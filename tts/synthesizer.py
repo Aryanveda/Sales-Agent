@@ -2,14 +2,9 @@ import io
 import os
 import logging
 from tts.prompt import LLMResponse
-from TTS.api import TTS
 from gtts import gTTS
-import gtts
 
 logger = logging.getLogger(__name__)
-
-MODEL_DIR    = os.path.join(os.path.dirname(__file__), "model")
-VOICE_SAMPLE = os.path.join(os.path.dirname(__file__), "voice_samples", "voice.wav")
 
 LLM_INTENTS = {"compare_skus", "recommend_product", "explain_product"}
 
@@ -94,35 +89,14 @@ class ResponseBuilder:
 
 class Synthesizer:
     def __init__(self, model_path: str = None):
-        os.makedirs(MODEL_DIR, exist_ok=True)
-        self.voice_sample = VOICE_SAMPLE if os.path.exists(VOICE_SAMPLE) else None
-        if self._is_windows():
-            self._init_gtts()
-        else:
-            self._init_xtts(model_path)
-
-    def _is_windows(self) -> bool:
-        return os.name == "nt"
-
-    def _init_gtts(self):
         self.engine = "gtts"
-        logger.info("TTS engine: gTTS (Windows)")
-
-    def _init_xtts(self, model_path: str = None):
-        if model_path and os.path.exists(model_path):
-            self.tts = TTS(model_path=model_path, progress_bar=False)
-        else:
-            self.tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2", progress_bar=False)
-        self.engine = "xtts"
-        logger.info("TTS engine: Coqui XTTS v2")
+        logger.info("TTS engine: gTTS")
 
     def speak(self, text: str) -> bytes:
         if not text.strip():
             return b""
         try:
-            if self.engine == "gtts":
-                return self._speak_gtts(text)
-            return self._speak_xtts(text)
+            return self._speak_gtts(text)
         except Exception as e:
             logger.error(f"[TTS] failed: {e}")
             return b""
@@ -130,17 +104,6 @@ class Synthesizer:
     def _speak_gtts(self, text: str) -> bytes:
         buf = io.BytesIO()
         gTTS(text=text, lang="hi").write_to_fp(buf)
-        buf.seek(0)
-        return buf.read()
-
-    def _speak_xtts(self, text: str) -> bytes:
-        buf = io.BytesIO()
-        self.tts.tts_to_file(
-            text=text,
-            speaker_wav=self.voice_sample,
-            language="hi",
-            file_path=buf,
-        )
         buf.seek(0)
         return buf.read()
 

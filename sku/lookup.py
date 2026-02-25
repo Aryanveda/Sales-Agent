@@ -1,32 +1,32 @@
 import os
-import json
 import time
+import uuid
+import sqlite3
 import logging
-import psycopg2
-import psycopg2.extras
+from dotenv import load_dotenv
 
-logger = logging.getLogger(__name__)
+load_dotenv()
 
-CACHE_TTL = 300  # seconds
+logger    = logging.getLogger(__name__)
+CACHE_TTL = 300
+DB_PATH   = os.getenv("DB_PATH", "db/aryaveda.db")
+
+
 class SKULookup:
     def __init__(self):
-        self.db    = self._connect_db()
-        self._cache = {}
+        self.db_path = DB_PATH
+        self._cache  = {}
 
-    def _connect_db(self):
-        return psycopg2.connect(
-            host=os.getenv("DB_HOST", "localhost"),
-            port=os.getenv("DB_PORT", 5432),
-            dbname=os.getenv("DB_NAME", "aryaveda"),
-            user=os.getenv("DB_USER", "postgres"),
-            password=os.getenv("DB_PASSWORD", ""),
-        )
+    def _conn(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn
 
     def _query(self, sql: str, params: tuple = ()) -> list:
-        with self.db.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, params)
-            return [dict(r) for r in cur.fetchall()]
-        
+        with self._conn() as conn:
+            return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
     def _cache_get(self, key: str):
         entry = self._cache.get(key)
         if entry and time.time() - entry["ts"] < CACHE_TTL:
@@ -49,15 +49,15 @@ class SKULookup:
                 s.unit,
                 ds.stock_qty,
                 COALESCE(ds.price_override, s.base_price) AS price,
-                d.name  AS dist_name,
-                d.code  AS dist_code
+                d.name AS dist_name,
+                d.code AS dist_code
             FROM distributor_skus ds
             JOIN skus         s ON ds.sku_id         = s.id
             JOIN distributors d ON ds.distributor_id  = d.id
-            WHERE s.sku_code = %s
-              AND d.code     = %s
-              AND s.is_active = TRUE
-              AND d.is_active = TRUE
+            WHERE s.sku_code = ?
+              AND d.code     = ?
+              AND s.is_active = 1
+              AND d.is_active = 1
         """, (sku_code, distributor_code))
 
         result = rows[0] if rows else None
@@ -81,8 +81,8 @@ class SKULookup:
             FROM distributor_skus ds
             JOIN skus         s ON ds.sku_id        = s.id
             JOIN distributors d ON ds.distributor_id = d.id
-            WHERE s.sku_code = %s
-              AND d.code     = %s
+            WHERE s.sku_code = ?
+              AND d.code     = ?
         """, (sku_code, distributor_code))
 
         result = rows[0] if rows else None
@@ -108,8 +108,8 @@ class SKULookup:
             FROM distributor_skus ds
             JOIN skus         s ON ds.sku_id        = s.id
             JOIN distributors d ON ds.distributor_id = d.id
-            WHERE d.code      = %s
-              AND s.is_active = TRUE
+            WHERE d.code      = ?
+              AND s.is_active = 1
               AND ds.stock_qty > 0
             ORDER BY s.category, s.name
         """, (distributor_code,))
@@ -122,28 +122,25 @@ class SKULookup:
         return result
 
     def place_order(self, sku_code: str, distributor_code: str, quantity: int, session_id: str = None) -> dict:
-        import uuid
         order_ref = f"AV-{uuid.uuid4().hex[:8].upper()}"
 
-        with self.db.cursor() as cur:
-            cur.execute("""
-                INSERT INTO orders (order_ref, session_id, distributor_id, sku_id, quantity, unit_price, total_amount, status, placed_via)
+        with self._conn() as conn:
+            conn.execute("""
+                INSERT INTO orders (id, order_ref, session_id, distributor_id, sku_id,
+                                    quantity, unit_price, total_amount, status, placed_via)
                 SELECT
-                    %s, %s,
-                    d.id,
-                    s.id,
-                    %s,
+                    ?, ?, ?,
+                    d.id, s.id,
+                    ?,
                     COALESCE(ds.price_override, s.base_price),
-                    COALESCE(ds.price_override, s.base_price) * %s,
-                    'pending',
-                    'voice'
+                    COALESCE(ds.price_override, s.base_price) * ?,
+                    'pending', 'voice'
                 FROM distributor_skus ds
                 JOIN skus         s ON ds.sku_id        = s.id
                 JOIN distributors d ON ds.distributor_id = d.id
-                WHERE s.sku_code = %s
-                  AND d.code     = %s
-            """, (order_ref, session_id, quantity, quantity, sku_code, distributor_code))
-            self.db.commit()
+                WHERE s.sku_code = ?
+                  AND d.code     = ?
+            """, (str(uuid.uuid4()), order_ref, session_id, quantity, quantity, sku_code, distributor_code))
 
         logger.info(f"[Order] placed {order_ref} — {quantity}x {sku_code} @ {distributor_code}")
         return {"order_ref": order_ref, "status": "pending"}
@@ -156,12 +153,17 @@ class SKULookup:
                 o.status,
                 o.placed_at,
                 o.total_amount,
-                s.name      AS sku_name,
-                d.name      AS dist_name
+                s.name AS sku_name,
+                d.name AS dist_name
             FROM orders       o
             JOIN skus         s ON o.sku_id         = s.id
             JOIN distributors d ON o.distributor_id = d.id
-            WHERE o.order_ref = %s
+            WHERE o.order_ref = ?
         """, (order_ref,))
 
         return rows[0] if rows else None
+
+    def fetch_distributors(self):
+        return self._query("""
+            SELECT code, name, name_hindi FROM distributors WHERE is_active = 1
+        """)
