@@ -3,7 +3,8 @@ import re
 import json
 import logging
 import sqlite3
-from openai import OpenAI
+from google import genai
+from google.genai import types
 from nlu.prompt import ENTITY_SYSTEM_PROMPT, ENTITY_USER_PROMPT
 
 load_dotenv = __import__('dotenv').load_dotenv
@@ -11,12 +12,32 @@ load_dotenv()
 
 logger  = logging.getLogger(__name__)
 DB_PATH = os.getenv("DB_PATH", "db/aryaveda.db")
+_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+
+def _parse_json(text: str) -> dict:
+    if not text or not text.strip():
+        raise ValueError("Empty response from model")
+    cleaned = re.sub(r"^```(?:json)?\s*", "", text.strip())
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    return json.loads(cleaned.strip())
+
+
+def _extract_text(response) -> str:
+    raw = response.text if response.text else ""
+    if not raw and response.candidates:
+        raw = "".join(
+            part.text
+            for part in response.candidates[0].content.parts
+            if hasattr(part, "text") and part.text
+        )
+    return raw
 
 
 class EntityResolver:
-    def __init__(self, model: str = "gpt-4o-mini"):
-        self.client  = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    def __init__(self, model: str = "gemini-2.5-flash"):
         self.model   = model
+        self.client  = _client
         self.db_path = DB_PATH
 
     def _fetch_distributors(self):
@@ -59,25 +80,25 @@ class EntityResolver:
                 return dist["code"]
 
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                temperature=0,
-                max_tokens=100,
-                response_format={"type": "json_object"},
-                messages=[
-                    {"role": "system", "content": ENTITY_SYSTEM_PROMPT.format(
-                        distributor_list=json.dumps(distributors, ensure_ascii=False, indent=2)
-                    )},
-                    {"role": "user", "content": ENTITY_USER_PROMPT.format(
-                        spoken_name=spoken_name
-                    )}
-                ]
+            system_prompt = ENTITY_SYSTEM_PROMPT.format(
+                distributor_list=json.dumps(distributors, ensure_ascii=False, indent=2)
             )
-            result = json.loads(response.choices[0].message.content)
+            prompt   = ENTITY_USER_PROMPT.format(spoken_name=spoken_name)
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    temperature=0,
+                    max_output_tokens=100,
+                    response_mime_type="application/json",
+                ),
+            )
+            result = _parse_json(_extract_text(response))
             code   = result.get("distributor_code")
             conf   = result.get("confidence", 0)
             if code and conf >= 0.7:
-                logger.info(f"[Entities] GPT match: {code} conf={conf}")
+                logger.info(f"[Entities] Gemini match: {code} conf={conf}")
                 return code
             return None
         except Exception as e:

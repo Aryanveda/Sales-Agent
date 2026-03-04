@@ -1,8 +1,10 @@
 import os
+import re
 import json
 import logging
 import time
-from openai import OpenAI
+from google import genai
+from google.genai import types
 from dotenv import load_dotenv
 
 from stt.transcriber import Transcriber
@@ -13,7 +15,27 @@ from sku.lookup import SKULookup
 from agent.prompt import SKYNET_SYSTEM_PROMPT, SKYNET_USER_PROMPT
 
 load_dotenv()
-logger = logging.getLogger(__name__)
+logger  = logging.getLogger(__name__)
+_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+
+def _parse_json(text: str) -> dict:
+    if not text or not text.strip():
+        raise ValueError("Empty response from model")
+    cleaned = re.sub(r"^```(?:json)?\s*", "", text.strip())
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    return json.loads(cleaned.strip())
+
+
+def _extract_text(response) -> str:
+    raw = response.text if response.text else ""
+    if not raw and response.candidates:
+        raw = "".join(
+            part.text
+            for part in response.candidates[0].content.parts
+            if hasattr(part, "text") and part.text
+        )
+    return raw
 
 
 class Skynet:
@@ -24,7 +46,8 @@ class Skynet:
         self.nlu    = IntentClassifier()
         self.ner    = EntityResolver()
         self.sku    = SKULookup()
-        self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        self.client = _client
+        self.model  = "gemini-2.5-flash"
         logger.info("Skynet ready.")
 
     def run_turn(self, audio_bytes: bytes, session: dict) -> dict:
@@ -36,9 +59,9 @@ class Skynet:
         confidence = stt_result["confidence"]
 
         # ── 2. Intent + Entities ─────────────────────────────────────────────
-        nlu_result   = self.nlu.classify(transcript)
-        intent       = nlu_result["intent"]
-        entities     = self.ner.resolve(nlu_result["entities"])
+        nlu_result = self.nlu.classify(transcript)
+        intent     = nlu_result["intent"]
+        entities   = self.ner.resolve(nlu_result["entities"])
 
         # Fill gaps from session memory
         entities = self._fill_from_session(entities, session)
@@ -75,38 +98,33 @@ class Skynet:
             "end_call":      action in ["respond_direct"] and intent in ["end_call", "escalate"],
         }
 
-    # ── GPT Decision Engine ───────────────────────────────────────────────────
+    # ── Gemini Decision Engine ────────────────────────────────────────────────
 
     def _decide(self, intent: str, entities: dict, session: dict, sku_data: dict, confidence: float) -> dict:
         try:
-            response = self.client.chat.completions.create(
-                model="gpt-4o-mini",
-                temperature=0,
-                max_tokens=150,
-                response_format={"type": "json_object"},
-                messages=[
-                    {
-                        "role": "system",
-                        "content": SKYNET_SYSTEM_PROMPT
-                    },
-                    {
-                        "role": "user",
-                        "content": SKYNET_USER_PROMPT.format(
-                            intent=intent,
-                            entities=json.dumps(entities, ensure_ascii=False),
-                            session=json.dumps({
-                                "last_sku":         session.get("last_sku"),
-                                "last_distributor": session.get("last_distributor"),
-                                "pending_order":    session.get("pending_order"),
-                                "turn":             session.get("turn"),
-                                "stt_confidence":   confidence,
-                            }, ensure_ascii=False),
-                            sku_data=json.dumps(sku_data, ensure_ascii=False, default=str),
-                        )
-                    }
-                ]
+            prompt = SKYNET_USER_PROMPT.format(
+                intent=intent,
+                entities=json.dumps(entities, ensure_ascii=False),
+                session=json.dumps({
+                    "last_sku":         session.get("last_sku"),
+                    "last_distributor": session.get("last_distributor"),
+                    "pending_order":    session.get("pending_order"),
+                    "turn":             session.get("turn"),
+                    "stt_confidence":   confidence,
+                }, ensure_ascii=False),
+                sku_data=json.dumps(sku_data, ensure_ascii=False, default=str),
             )
-            return json.loads(response.choices[0].message.content)
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=SKYNET_SYSTEM_PROMPT,
+                    temperature=0,
+                    max_output_tokens=150,
+                    response_mime_type="application/json",
+                ),
+            )
+            return _parse_json(_extract_text(response))
 
         except Exception as e:
             logger.error(f"[Skynet] decision failed: {e}")

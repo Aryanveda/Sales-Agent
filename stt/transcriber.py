@@ -10,9 +10,23 @@ logger = logging.getLogger(__name__)
 
 MODEL_DIR = os.path.join(os.path.dirname(__file__), "model")
 
+# Initial prompt steers Whisper to output Hinglish in Roman script
+# instead of Devanagari Hindi — makes NLU matching far more reliable
+HINGLISH_PROMPT = (
+    "AryanVeda sales assistant conversation. "
+    "Products: Amla Hair Oil, Almond Hair Oil, Coconut Oil, Boroneem Talcum, "
+    "Fruit Glow Cream, Silk Plus Cold Cream, Nature Fresh Shampoo. "
+    "Distributors: Mumbai, Delhi, Bangalore, Hyderabad, Punjab, Gujarat, Rajasthan. "
+    "The speaker uses Hinglish — mix of Hindi and English in Roman script. "
+    "Examples: 'mumbai wale ke paas amla hair oil 180 ml ka stock hai kya', "
+    "'delhi distributor ko almond oil 100 ml ka price batao', "
+    "'AV-010 ka stock check karo', "
+    "'100 piece ka order place karna hai'. "
+    "Always transcribe in Roman script Hinglish, never Devanagari."
+)
 
 class Transcriber:
-    def __init__(self, model_size: str = "medium"):
+    def __init__(self, model_size: str = "small"):
         os.makedirs(MODEL_DIR, exist_ok=True)
         logger.info(f"Loading Whisper '{model_size}'...")
         self.model = whisper.load_model(model_size, download_root=MODEL_DIR)
@@ -26,8 +40,9 @@ class Transcriber:
 
         result = self.model.transcribe(
             audio_array,
-            language="hi",
+            language="hi",           # tell Whisper the spoken language is Hindi
             task="transcribe",
+            initial_prompt=HINGLISH_PROMPT,   # steer output to Roman script
             fp16=False,
             verbose=False,
         )
@@ -59,6 +74,5 @@ class Transcriber:
         segments = result.get("segments", [])
         if not segments:
             return 0.5
-
         avg_logprob = sum(s.get("avg_logprob", -1.0) for s in segments) / len(segments)
         return round(max(0.0, min(1.0, 1.0 + avg_logprob / 2.0)), 2)
