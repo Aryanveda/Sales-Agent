@@ -10,19 +10,24 @@ logger = logging.getLogger(__name__)
 
 MODEL_DIR = os.path.join(os.path.dirname(__file__), "model")
 
-# Initial prompt steers Whisper to output Hinglish in Roman script
-# instead of Devanagari Hindi — makes NLU matching far more reliable
+# Long prompt full of Roman-script Hinglish examples forces Whisper.
+# to output in Roman script even when speaker is talking Hindi.
+# No hard mapping — just context examples that bias the output style.
 HINGLISH_PROMPT = (
-    "AryanVeda sales assistant conversation. "
-    "Products: Amla Hair Oil, Almond Hair Oil, Coconut Oil, Boroneem Talcum, "
-    "Fruit Glow Cream, Silk Plus Cold Cream, Nature Fresh Shampoo. "
-    "Distributors: Mumbai, Delhi, Bangalore, Hyderabad, Punjab, Gujarat, Rajasthan. "
-    "The speaker uses Hinglish — mix of Hindi and English in Roman script. "
-    "Examples: 'mumbai wale ke paas amla hair oil 180 ml ka stock hai kya', "
-    "'delhi distributor ko almond oil 100 ml ka price batao', "
-    "'AV-010 ka stock check karo', "
-    "'100 piece ka order place karna hai'. "
-    "Always transcribe in Roman script Hinglish, never Devanagari."
+    "This is a sales call for AryanVeda herbal products. "
+    "The caller speaks Hinglish — natural mix of Hindi words and English, always in Roman script. "
+    "Example phrases from this call: "
+    "'mumbai wale ke paas amla hair oil 180 ml ka stock hai kya', "
+    "'bhai delhi mein almond oil kitne ka hai', "
+    "'bangalore distributor ko 100 piece ka order dena hai', "
+    "'kya coconut oil available hai gujarat mein', "
+    "'price batao silk plus cold cream ka', "
+    "'haan theek hai order place kar do', "
+    "'nahi cancel kar do yaar', "
+    "'kitna stock bacha hai pune mein', "
+    "'AV-010 ka rate kya hai mumbai ke liye', "
+    "'fruit glow cream 50 gram ka MRP kya hai', "
+    "Transcribe exactly as spoken in Roman Hinglish script."
 )
 
 class Transcriber:
@@ -34,24 +39,30 @@ class Transcriber:
 
     def transcribe(self, audio_bytes: bytes) -> dict:
         if not audio_bytes:
-            return {"text": "", "language": "hi", "confidence": 0.0}
+            return {"text": "", "language": "hinglish", "confidence": 0.0}
 
         audio_array = self._bytes_to_array(audio_bytes)
 
         result = self.model.transcribe(
             audio_array,
-            language="hi",           # tell Whisper the spoken language is Hindi
+            language=None,              # auto-detect — avoids locking to Devanagari
             task="transcribe",
-            initial_prompt=HINGLISH_PROMPT,   # steer output to Roman script
+            initial_prompt=HINGLISH_PROMPT,
             fp16=False,
             verbose=False,
+            condition_on_previous_text=True,   # uses prompt context throughout
         )
 
         text       = result.get("text", "").strip()
         language   = result.get("language", "hi")
         confidence = self._confidence(result)
 
-        logger.info(f"[STT] '{text}' | conf={confidence:.2f}")
+        # Post-process: if Devanagari still slips through, flag it in logs
+        devanagari_chars = sum(1 for c in text if '\u0900' <= c <= '\u097F')
+        if devanagari_chars > 3:
+            logger.warning(f"[STT] Devanagari detected in output ({devanagari_chars} chars) — NLU may still work via Gemini")
+
+        logger.info(f"[STT] '{text}' | conf={confidence:.2f} | lang={language}")
         return {"text": text, "language": language, "confidence": confidence}
 
     def transcribe_file(self, path: str) -> dict:

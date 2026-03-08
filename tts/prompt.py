@@ -3,33 +3,21 @@ import logging
 from google import genai
 from google.genai import types
 
-logger = logging.getLogger(__name__)
-
+logger  = logging.getLogger(__name__)
 _client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
+_SYSTEM = """You are Skynet, AryanVeda's friendly sales assistant on a phone call.
+- Speak natural Hinglish (Hindi + English mix the way Indian salespeople talk)
+- Never say SKU codes, batch numbers, or internal IDs
+- Use "bhai", "ji", "yaar" naturally
+- Keep responses to 2-3 sentences — this is voice, not chat
+- Be warm and proactive — mention low stock urgency, suggest alternatives"""
 
-SYSTEM_PROMPT = """You are AryanVeda's Hinglish voice sales assistant.
-You help distributors check SKU stock, pricing, and place orders.
+_USER = """Intent: {intent}
+DB data: {sku_data}
+Entities: {entities}
 
-Rules:
-- Always respond in Hinglish (natural mix of Hindi and English — the way people actually speak in Indian business)
-- Example style: "Haan bhai, AV-101 ka stock abhi 200 units available hai Mumbai warehouse mein."
-- Be concise — max 2 sentences (this is a spoken voice response, not written)
-- Never make up stock numbers or prices — if data is missing, say so clearly
-- Address the distributor in a friendly, respectful tone
-- Use English for product names, SKU codes, numbers, and business terms
-- Use Hindi for conversational connectors and natural flow"""
-
-
-USER_PROMPT = """Intent detected: {intent}
-
-SKU data from database:
-{sku_data}
-
-Entities extracted from caller speech:
-{entities}
-
-Generate a natural Hinglish voice response for this situation."""
+Reply as Skynet in natural Hinglish. 2-3 sentences max. No SKU codes."""
 
 
 class LLMResponse:
@@ -39,18 +27,17 @@ class LLMResponse:
 
     def generate(self, intent: str, sku_data: dict, entities: dict) -> str:
         try:
-            prompt = USER_PROMPT.format(
-                intent=intent,
-                sku_data=sku_data,
-                entities=entities,
-            )
             response = self.client.models.generate_content(
                 model=self.model,
-                contents=prompt,
+                contents=_USER.format(
+                    intent=intent,
+                    sku_data=sku_data,
+                    entities=entities,
+                ),
                 config=types.GenerateContentConfig(
-                    system_instruction=SYSTEM_PROMPT,
-                    temperature=0.3,
-                    max_output_tokens=120,
+                    system_instruction=_SYSTEM,
+                    temperature=0.4,
+                    max_output_tokens=2000,   # was 120 — caused all truncation
                 ),
             )
             text = response.text.strip()
@@ -59,4 +46,4 @@ class LLMResponse:
 
         except Exception as e:
             logger.error(f"[LLM] failed: {e}")
-            return "Sorry bhai, abhi information available nahi hai. Please thodi der baad try karein."
+            return "Sorry bhai, abhi kuch technical issue hai. Ek second mein dobara try karo."
