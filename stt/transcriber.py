@@ -10,25 +10,40 @@ logger = logging.getLogger(__name__)
 
 MODEL_DIR = os.path.join(os.path.dirname(__file__), "model")
 
-# Long prompt full of Roman-script Hinglish examples forces Whisper.
-# to output in Roman script even when speaker is talking Hindi.
-# No hard mapping — just context examples that bias the output style.
 HINGLISH_PROMPT = (
-    "This is a sales call for AryanVeda herbal products. "
-    "The caller speaks Hinglish — natural mix of Hindi words and English, always in Roman script. "
-    "Example phrases from this call: "
-    "'mumbai wale ke paas amla hair oil 180 ml ka stock hai kya', "
-    "'bhai delhi mein almond oil kitne ka hai', "
-    "'bangalore distributor ko 100 piece ka order dena hai', "
-    "'kya coconut oil available hai gujarat mein', "
-    "'price batao silk plus cold cream ka', "
-    "'haan theek hai order place kar do', "
-    "'nahi cancel kar do yaar', "
-    "'kitna stock bacha hai pune mein', "
-    "'AV-010 ka rate kya hai mumbai ke liye', "
-    "'fruit glow cream 50 gram ka MRP kya hai', "
-    "Transcribe exactly as spoken in Roman Hinglish script."
+    "This is a sales call for AryanVeda/Nimson herbal products in India. "
+    "The caller speaks Hinglish — natural mix of Hindi and English, always in Roman script. "
+    "Example phrases: "
+    "'colour plus shampoo 90 ml ka stock hai', "
+    "'nimson amla hair oil 180 ml kitne ka hai', "
+    "'kya coconut oil 500 ml available hai', "
+    "'boroneem talcum powder price batao', "
+    "'fruit glow cream 100 gram ka daam kya hai', "
+    "'vasojelly mix 50 ml order karo', "
+    "'nimson papaya d-tan face wash ka rate kya hai', "
+    "'green apple shampoo 500 ml bhejna hai', "
+    "'nimson herbal shampoo stock check karo', "
+    "'aloevera cucumber cream 50 gram kitna hai', "
+    "'hair removing cream 60 gram order dena hai', "
+    "'gold bleach 43 gram available kya', "
+    "'sunscreen spf 30 200 ml bhejo', "
+    "'nimson lip guard 10 ml price', "
+    "'keshsilk plus oil 450 ml chahiye', "
+    "'divy cool cool oil 180 ml kitne piece chahiye', "
+    "'nature fresh shampoo 500 ml daam', "
+    "'olive body oil 100 ml order', "
+    "'glycerin solution 110 ml stock', "
+    "'gulab jal rose water 50 ml available', "
+    "'charcoal face wash 60 ml', "
+    "'ubtan face wash 100 ml', "
+    "'vitamin c face wash 60 ml', "
+    "'honey almond cream 100 gram', "
+    "'hand body lotion 180 ml', "
+    "'petroleum jelly 42 gram', "
+    "'turmeric cream 30 gram order', "
+    "Transcribe exactly as spoken in Roman Hinglish."
 )
+
 
 class Transcriber:
     def __init__(self, model_size: str = "small"):
@@ -45,24 +60,23 @@ class Transcriber:
 
         result = self.model.transcribe(
             audio_array,
-            language=None,              # auto-detect — avoids locking to Devanagari
+            language=None,
             task="transcribe",
             initial_prompt=HINGLISH_PROMPT,
             fp16=False,
             verbose=False,
-            condition_on_previous_text=True,   # uses prompt context throughout
+            condition_on_previous_text=True,
         )
 
         text       = result.get("text", "").strip()
         language   = result.get("language", "hi")
         confidence = self._confidence(result)
 
-        # Post-process: if Devanagari still slips through, flag it in logs
         devanagari_chars = sum(1 for c in text if '\u0900' <= c <= '\u097F')
         if devanagari_chars > 3:
-            logger.warning(f"[STT] Devanagari detected in output ({devanagari_chars} chars) — NLU may still work via Gemini")
+            logger.warning(f"[STT] Devanagari detected ({devanagari_chars} chars) — NLU may still work")
 
-        logger.info(f"[STT] '{text}' | conf={confidence:.2f} | lang={language}")
+        logger.info(f"[STT] text='{text}' confidence={confidence:.2f} language={language}")
         return {"text": text, "language": language, "confidence": confidence}
 
     def transcribe_file(self, path: str) -> dict:

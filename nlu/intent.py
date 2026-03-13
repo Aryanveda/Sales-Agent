@@ -7,7 +7,7 @@ from google.genai import types
 from google.genai.errors import ServerError
 
 load_dotenv = __import__('dotenv').load_dotenv
-load_dotenv()
+load_dotenv(override=False)
 
 logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
@@ -17,7 +17,6 @@ _client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 INTENT_PROMPT = """You are an intent + entity extractor for AryanVeda/Nimson sales calls in India.
 Callers speak Hinglish — Hindi/English mix with pronunciation errors and partial words. Be very generous.
 
-────────────────────────────────────────────────
 PRODUCT FAMILIES (for reference — do NOT resolve to IDs here, just capture what was said):
   HAIR OIL    : Nimson Amla, Coconut Jasmine, Keshsilk Plus, Kesh Silk, Almond, Himaryan,
                 Divyaratna Cool Cool, Coconut Oil, Rosemary, Kerala Ayurvedic, Olive Body Oil
@@ -53,7 +52,6 @@ HINGLISH → PRODUCT HINTS (common pronunciations):
   "hair removing / hair removal" → Hair removing Cream
   "bleach"                       → Fruit Glow Bleach or Gold Bleach
 
-────────────────────────────────────────────────
 INTENTS (be generous, match loosely):
   check_stock  = availability / stock / quantity on hand ("hai kya", "kitna hai", "stock check", "available hai")
   get_price    = price / rate / cost / MRP / daam / dam / mol ("rate kya hai", "kitne ka", "price batao",
@@ -66,9 +64,8 @@ INTENTS (be generous, match loosely):
   end_call     = ending call / bye / shukriya / theek hai bas / done
   unknown      = genuinely unclear even with generous interpretation
 
-────────────────────────────────────────────────
 ENTITY EXTRACTION RULES:
-  product_name : Capture EXACTLY what was said about the product — raw, unresolved.
+  product_name : Capture EXACTLY what was said about the product — raw, unresolved in Roman Hinglish only.
                  Include brand + variant if mentioned ("nimson amla 180", "cool cool badi wali").
                  If caller says "iske" / "iska" / "iski" / "wahi wala" / "same" / "usi ka" /
                  "ye wala" / "yahi" → set to null (caller is referring to previous product in context).
@@ -83,8 +80,11 @@ ENTITY EXTRACTION RULES:
                  Extract the final integer value only.
   order_ref    : Any order reference / invoice number if mentioned.
 
+CRITICAL: Return product_name and all entities in Roman Hinglish script ONLY. NO DEVANAGARI.
+If input has any Devanagari (Hindi script), convert it to Roman Hinglish equivalents before returning.
+
 Return ONLY compact single-line JSON — no markdown fences, no explanation:
-{{"intent":"<intent>","confidence":<0.0-1.0>,"entities":{{"product_name":"<raw spoken or null>","weight_hint":"<size spoken or null>","quantity":<number or null>,"order_ref":"<ref or null>"}},"language":"hinglish"}}
+{{"intent":"<intent>","confidence":<0.0-1.0>,"entities":{{"product_name":"<roman hinglish or null>","weight_hint":"<size spoken or null>","quantity":<number or null>,"order_ref":"<ref or null>"}},"language":"hinglish"}}
 
 Input transcript: {transcript}"""
 
@@ -100,14 +100,13 @@ def _extract_text(response) -> str:
 
 class IntentClassifier:
     def __init__(self, model: str = "gemini-2.5-flash"):
-        self.model  = model
+        self.model = model
         self.client = _client
 
     def classify(self, transcript: str, retries: int = 3, backoff: float = 2.0) -> dict:
         if not transcript.strip():
             return self._empty()
 
-        last_error = None
         for attempt in range(1, retries + 1):
             try:
                 response = self.client.models.generate_content(
@@ -119,7 +118,7 @@ class IntentClassifier:
                         response_mime_type="application/json",
                     ),
                 )
-                raw    = _extract_text(response)
+                raw = _extract_text(response)
                 result = json.loads(raw)
 
                 entities = result.get("entities", {})
@@ -132,29 +131,29 @@ class IntentClassifier:
                 return result
 
             except ServerError as e:
-                last_error = e
                 if attempt < retries:
                     wait = backoff * attempt
-                    print(f"  [retry {attempt}/{retries}] Gemini 503 — retrying in {wait:.0f}s...", flush=True)
+                    logger.warning(f"[NLU] Gemini 503 — retry {attempt}/{retries}")
                     time.sleep(wait)
                 else:
-                    print(f"  [error] Gemini unavailable after {retries} attempts: {e}", flush=True)
+                    logger.error(f"[NLU] Gemini failed after {retries} attempts")
+                    return self._empty()
 
             except Exception as e:
-                print(f"  [error] classify failed: {type(e).__name__}: {e}", flush=True)
+                logger.error(f"[NLU] {type(e).__name__}: {e}")
                 return self._empty()
 
         return self._empty()
 
     def _empty(self) -> dict:
         return {
-            "intent":     "unknown",
+            "intent": "unknown",
             "confidence": 0.0,
             "entities": {
                 "product_name": None,
-                "weight_hint":  None,
-                "quantity":     None,
-                "order_ref":    None,
+                "weight_hint": None,
+                "quantity": None,
+                "order_ref": None,
             },
             "language": "hinglish",
         }
