@@ -75,38 +75,6 @@ def divider():
 def header(title):
     print(f"\n{BOLD}{CYAN}{'-' * 62}\n  {title}\n{'-' * 62}{RESET}")
 
-class SessionContext:
-    def __init__(self):
-        self.product_id   = None
-        self.product_name = None
-        self.weight       = None
-        self.mrp_unit     = None
-        self.offer_rate   = None
-
-    def update(self, resolved, db_row):
-        if resolved.get("product_id"):
-            self.product_id   = resolved.get("product_id")
-            self.product_name = resolved.get("product_name")
-            self.weight       = resolved.get("weight")
-            self.mrp_unit     = db_row.get("mrp_unit") if db_row else None
-            self.offer_rate   = db_row.get("offer_rate_new") if db_row else None
-
-    def apply(self, resolved, weight_hint=None):
-        if not resolved.get("product_id") and self.product_id:
-            if weight_hint:
-                resolved["_needs_weight_resolve"] = True
-                resolved["_memory_product_name"]  = self.product_name
-            else:
-                resolved["product_id"]   = self.product_id
-                resolved["product_name"] = self.product_name
-                resolved["weight"]       = self.weight
-                resolved["_from_memory"] = True
-        return resolved
-
-    def summary(self):
-        if self.product_id:
-            return f"{self.product_name} | {self.weight}"
-        return "none"
 
 def fetch_product_row(product_id):
     if not product_id:
@@ -114,13 +82,14 @@ def fetch_product_row(product_id):
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
-        row = conn.execute(
+        row  = conn.execute(
             "SELECT * FROM products WHERE id=? AND is_active=1", (product_id,)
         ).fetchone()
         conn.close()
         return dict(row) if row else None
     except Exception as e:
         return {"error": str(e)}
+
 
 def fuzzy_search_products(keyword, limit=5):
     if not keyword:
@@ -132,11 +101,10 @@ def fuzzy_search_products(keyword, limit=5):
         conn   = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         clause = " AND ".join(f"LOWER(product_name) LIKE ?" for _ in words)
-        params = [f"%{w}%" for w in words]
         rows   = conn.execute(
             f"SELECT id, product_name, weight, mrp_unit, offer_rate_new "
             f"FROM products WHERE {clause} AND is_active=1 LIMIT ?",
-            params + [limit]
+            [f"%{w}%" for w in words] + [limit]
         ).fetchall()
         conn.close()
         return [dict(r) for r in rows]
@@ -145,11 +113,10 @@ def fuzzy_search_products(keyword, limit=5):
 
 
 def print_intent_block(result, elapsed):
-    intent   = result.get("intent", "unknown")
-    conf     = result.get("confidence", 0.0)
-    entities = result.get("entities", {})
-    lang     = result.get("language", "?")
-
+    intent     = result.get("intent", "unknown")
+    conf       = result.get("confidence", 0.0)
+    entities   = result.get("entities", {})
+    lang       = result.get("language", "?")
     conf_color = GREEN if conf >= 0.8 else (YELLOW if conf >= 0.5 else RED)
     int_color  = GREEN if intent != "unknown" else RED
 
@@ -164,22 +131,17 @@ def print_intent_block(result, elapsed):
 
 
 def print_entity_block(resolved, elapsed):
-    pid   = resolved.get("product_id")
-    name  = resolved.get("product_name")
-    wt    = resolved.get("weight")
-    conf  = resolved.get("confidence", 0.0)
-    cands = resolved.get("candidates", [])
-
+    pid        = resolved.get("product_id")
+    conf       = resolved.get("confidence", 0.0)
     conf_color = GREEN if conf >= 0.75 else (YELLOW if conf >= 0.5 else RED)
-    id_color   = GREEN if pid else RED
 
     print(f"\n  {BOLD}ENTITY RESOLUTION{RESET}")
-    print(f"     product_id   : {c(pid or 'NULL', id_color)}")
-    print(f"     product_name : {c(name or '-', CYAN)}")
-    print(f"     weight       : {c(wt or '-', CYAN)}")
+    print(f"     product_id   : {c(pid or 'NULL', GREEN if pid else RED)}")
+    print(f"     product_name : {c(resolved.get('product_name') or '-', CYAN)}")
+    print(f"     weight       : {c(resolved.get('weight') or '-', CYAN)}")
     print(f"     confidence   : {c(f'{conf:.2f}', conf_color)}  |  {c(f'{elapsed:.2f}s', DIM)}")
-    if cands:
-        print(f"     candidates   : {c(', '.join(cands), MAGENTA)}")
+    if resolved.get("candidates"):
+        print(f"     candidates   : {c(', '.join(resolved['candidates']), MAGENTA)}")
 
 
 def print_db_block(row, fuzzy, product_name):
@@ -190,21 +152,20 @@ def print_db_block(row, fuzzy, product_name):
         print(f"     id           : {row['id']}")
         print(f"     product_name : {row['product_name']}")
         print(f"     weight       : {row['weight']}")
-        if row.get('mrp_unit'):
+        if row.get("mrp_unit"):
             print(f"     mrp_unit     : {row['mrp_unit']:.2f}")
-        if row.get('offer_rate_new'):
+        if row.get("offer_rate_new"):
             print(f"     offer_rate   : {row['offer_rate_new']:.2f}")
-        if row.get('master_package'):
+        if row.get("master_package"):
             print(f"     master_pack  : {row['master_package']}")
-        if row.get('scheme_percentage'):
+        if row.get("scheme_percentage"):
             print(f"     scheme       : {row['scheme_percentage']}  ({row.get('scheme_amount', 0):.2f} off)")
-        if row.get('billing'):
+        if row.get("billing"):
             print(f"     billing      : {row['billing']:.2f}")
-        if row.get('distributor_total'):
+        if row.get("distributor_total"):
             print(f"     dist_total   : {row['distributor_total']:.2f}")
-        if row.get('retail'):
+        if row.get("retail"):
             print(f"     retail       : {row['retail']:.2f}")
-
     elif fuzzy:
         print(f"     status       : {c('NO EXACT MATCH - fuzzy fallback', YELLOW)}")
         print(f"     {'id':<12} {'product_name':<44} {'weight':<10} {'mrp':>7}  {'offer':>9}")
@@ -224,74 +185,52 @@ def print_db_block(row, fuzzy, product_name):
         print(f"     status       : {c('NOT FOUND', RED)}")
         print(f"     query was    : '{product_name}'")
 
-def run_pipeline(query, classifier, resolver, verbose=True, session=None):
+
+def run_pipeline(query, classifier, resolver, verbose=True):
     if verbose:
         divider()
         print(f"\n  {BOLD}QUERY{RESET}  {c(query, YELLOW)}")
-        if session and session.product_id:
-            print(f"  {DIM}context  {session.summary()}{RESET}")
 
-    t0 = time.time()
+    t0            = time.time()
     if verbose:
         print(f"  {DIM}step 1/3  intent classification...{RESET}", flush=True)
     intent_result = classifier.classify(query)
-    t1 = time.time()
-
-    if intent_result.get("intent") == "unknown" and intent_result.get("confidence") == 0.0:
-        if verbose:
-            print(f"  {c('classifier returned empty - likely API error, check above', RED)}", flush=True)
+    t1            = time.time()
 
     if verbose:
+        if intent_result.get("intent") == "unknown" and intent_result.get("confidence") == 0.0:
+            print(f"  {c('classifier returned empty — check logs above', RED)}", flush=True)
         print_intent_block(intent_result, t1 - t0)
 
     raw_entities = intent_result.get("entities", {})
-    weight_hint  = raw_entities.get("weight_hint") or ""
 
-    t2 = time.time()
+    t2       = time.time()
     if verbose:
         print(f"  {DIM}step 2/3  entity resolution...{RESET}", flush=True)
     resolved = resolver.resolve(raw_entities)
-    t3 = time.time()
-
-    if session:
-        resolved = session.apply(resolved, weight_hint=weight_hint)
-
-    if resolved.get("_needs_weight_resolve"):
-        memory_name = resolved.get("_memory_product_name", "")
-        override_entities = dict(raw_entities)
-        override_entities["product_name"] = memory_name
-        t2b = time.time()
-        resolved = resolver.resolve(override_entities)
-        t3 = time.time() - t2b + t2
-        resolved["_from_memory_with_weight"] = True
+    t3       = time.time()
 
     if verbose:
-        if resolved.get("_from_memory"):
-            print(f"\n  {BOLD}ENTITY RESOLUTION{RESET}")
-            print(f"     {c('resolved from session memory', MAGENTA)}")
-            print(f"     product_id   : {c(resolved.get('product_id'), GREEN)}")
-            print(f"     product_name : {c(resolved.get('product_name') or '-', CYAN)}")
-            print(f"     weight       : {c(resolved.get('weight') or '-', CYAN)}")
-        elif resolved.get("_from_memory_with_weight"):
-            print(f"\n  {BOLD}ENTITY RESOLUTION{RESET}")
-            print(f"     {c('memory product + new weight variant', MAGENTA)}")
-            print(f"     product_id   : {c(resolved.get('product_id') or 'NULL', GREEN if resolved.get('product_id') else RED)}")
-            print(f"     product_name : {c(resolved.get('product_name') or '-', CYAN)}")
-            print(f"     weight       : {c(resolved.get('weight') or '-', CYAN)}")
-            print(f"     confidence   : {c(str(resolved.get('confidence', 0.0)), DIM)}")
-        else:
-            print_entity_block(resolved, t3 - t2)
+        print_entity_block(resolved, t3 - t2)
 
     if verbose:
         print(f"  {DIM}step 3/3  database fetch...{RESET}", flush=True)
+
     db_row = fetch_product_row(resolved.get("product_id"))
     fuzzy  = []
     if not db_row:
-        raw_name = raw_entities.get("product_name") or ""
-        fuzzy    = fuzzy_search_products(raw_name)
+        fuzzy = fuzzy_search_products(raw_entities.get("product_name") or "")
 
-    if session:
-        session.update(resolved, db_row)
+    # Feed a concise agent turn back into history so the next classify()
+    # call knows what information was already given to the caller.
+    if db_row and "error" not in db_row:
+        classifier.add_agent_turn(
+            f"{db_row['product_name']} {db_row['weight']} — "
+            f"MRP {db_row.get('mrp_unit', '')}, offer {db_row.get('offer_rate_new', '')}"
+        )
+    elif fuzzy:
+        names = ", ".join(f"{r['product_name']} {r.get('weight','')}" for r in fuzzy[:3])
+        classifier.add_agent_turn(f"Multiple variants found: {names}")
 
     if verbose:
         print_db_block(db_row, fuzzy, raw_entities.get("product_name", ""))
@@ -299,11 +238,10 @@ def run_pipeline(query, classifier, resolver, verbose=True, session=None):
 
     return intent_result, resolved, db_row
 
-def interactive_mode(classifier, resolver):
-    header("AryanVeda Pipeline Tester")
-    print(f"  {DIM}type a hinglish query | 'batch' to run test cases | 'reset' to clear memory | 'quit' to exit{RESET}\n")
 
-    session = SessionContext()
+def interactive_mode(classifier, resolver):
+    header("AryanVeda Pipeline — Interactive")
+    print(f"  {DIM}hinglish query | 'batch' for test suite | 'reset' to clear session | 'quit' to exit{RESET}\n")
 
     while True:
         try:
@@ -319,23 +257,23 @@ def interactive_mode(classifier, resolver):
             batch_mode(classifier, resolver)
             continue
         if query.lower() == "reset":
-            session = SessionContext()
-            print(f"  {DIM}session memory cleared{RESET}\n")
+            classifier.reset()
+            print(f"  {DIM}session cleared{RESET}\n")
             continue
 
-        run_pipeline(query, classifier, resolver, verbose=True, session=session)
+        run_pipeline(query, classifier, resolver, verbose=True)
+
 
 def batch_mode(classifier, resolver):
-    header(f"Batch Test  {len(TEST_CASES)} queries")
+    header(f"Batch Test — {len(TEST_CASES)} queries")
     print(f"  {'db':<5} {'intent match':<22} {'product_id':<12} {'resolved_name':<36} query")
     print(f"  {'-'*5} {'-'*22} {'-'*12} {'-'*36} {'-'*40}")
 
     passed = 0
     for query, expected_intent in TEST_CASES:
         intent_result, resolved, db_row = run_pipeline(
-            query, classifier, resolver, verbose=False, session=None
+            query, classifier, resolver, verbose=False
         )
-
         actual_intent = intent_result.get("intent", "unknown")
         prod_id       = resolved.get("product_id") or "NULL"
         prod_nm       = (resolved.get("product_name") or "-")[:35]
@@ -355,9 +293,11 @@ def batch_mode(classifier, resolver):
     print(f"\n  {BOLD}db match rate: {passed}/{len(TEST_CASES)}{RESET}")
     divider()
 
+
 def single_query_mode(query, classifier, resolver):
     header("Single Query")
-    run_pipeline(query, classifier, resolver, verbose=True, session=None)
+    run_pipeline(query, classifier, resolver, verbose=True)
+
 
 def main():
     if not os.path.exists(DB_PATH):
@@ -368,6 +308,7 @@ def main():
     print(f"\n{BOLD}loading pipeline...{RESET}", end=" ", flush=True)
     classifier = IntentClassifier()
     resolver   = EntityResolver()
+    resolver.share_history(classifier._history)   # single shared history
     print(f"{GREEN}ready{RESET}")
 
     if len(sys.argv) > 1:
@@ -379,6 +320,7 @@ def main():
         interactive_mode(classifier, resolver)
 
     print(f"\n{DIM}done{RESET}\n")
+
 
 if __name__ == "__main__":
     main()

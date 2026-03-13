@@ -1,251 +1,256 @@
 import os
-import json
+import re
 import logging
 import sqlite3
-import time
-from google import genai
-from google.genai import types
-from google.genai.errors import ServerError
 
 load_dotenv = __import__('dotenv').load_dotenv
 load_dotenv(override=False)
 
-logger = logging.getLogger(__name__)
+logger  = logging.getLogger(__name__)
 DB_PATH = os.getenv("DB_PATH", "db/aryaveda.db")
-_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+# Hinglish → canonical product name keyword map.
+# Keys are lowercase tokens the caller might say.
+# Values are the canonical product_name substrings to match in the DB.
+ALIAS_MAP = {
+    "amla":          "amla hair oil",
+    "amla tel":      "amla hair oil",
+    "badam":         "almond hair oil",
+    "badam tel":     "almond hair oil",
+    "almond":        "almond hair oil",
+    "cool cool":     "cool cool hair oil",
+    "thanda tel":    "cool cool hair oil",
+    "divyaratna":    "cool cool hair oil",
+    "colour plus":   "colour plus",
+    "color plus":    "colour plus",
+    "keshsilk":      "keshsilk",
+    "kesh silk":     "kesh silk",
+    "rosemary":      "rosemary hair",
+    "kerala":        "kerala ayurvedic",
+    "himaryan":      "himaryan",
+    "coconut":       "coconut",
+    "olive":         "olive",
+    "boroneem":      "boroneem",
+    "x-ice":         "x-ice",
+    "xice":          "x-ice",
+    "silk plus":     "silk plus",
+    "fruit glow":    "fruit glow",
+    "fruitglow":     "fruit glow",
+    "gold bleach":   "gold bleach",
+    "bleach":        "bleach",
+    "vasojelly":     "vasojelly",
+    "vaso jelly":    "vasojelly",
+    "strawberry":    "strawberry",
+    "cocoa":         "cocoa",
+    "petroleum":     "petroleum jelly",
+    "petro jelly":   "petroleum jelly",
+    "pj":            "petroleum jelly",
+    "gulab jal":     "gulab jal",
+    "rose water":    "rose water",
+    "sunscreen":     "sunscreen",
+    "sunblock":      "sunscreen",
+    "spf":           "sunscreen",
+    "glycerin":      "glycerin",
+    "glicerin":      "glycerin",
+    "turmeric":      "turmeric",
+    "haldi":         "turmeric",
+    "aloevera":      "aloevera",
+    "aloe":          "aloevera",
+    "honey almond":  "honey",
+    "shahad badam":  "honey",
+    "oats":          "oats",
+    "moisturiser":   "oats",
+    "brilliantine":  "brilliantine",
+    "hair spray":    "hair spray",
+    "lip guard":     "lip guard",
+    "lip jelly":     "lip jelly",
+    "green apple":   "green apple",
+    "protine":       "protine",
+    "herbal shampoo":"herbal",
+    "neem shampoo":  "herbal",
+    "hair removing": "hair removing",
+    "hair removal":  "hair removing",
+}
+
+# Weight token normalisation — what a caller says → what's stored in DB
+WEIGHT_ALIASES = {
+    "choti":  "small",
+    "chhoti": "small",
+    "badi":   "large",
+    "bari":   "large",
+}
 
 
-ENTITY_SYSTEM_PROMPT = """You are a product-matching engine for AryanVeda/Nimson herbal products in India.
-
-Your job: given a product name as spoken (often garbled Hinglish), find the best matching product from the catalog and return its ID and canonical name with weight/size variant.
-
-PRODUCT CATALOG (format: id | product_name | weight):
-{product_catalog}
-
-RULES:
-1. Match phonetically and semantically:
-   - "amla tel" / "amla hair oil" → Nimson Amla Hair Oil
-   - "colour plus shampoo" / "colour wala" → New Colour Plus Family Shampoo
-   - "cool cool oil" / "divyaratna" → Divyaratna Cool Cool Hair Oil
-   - "fruit glow" → Fruit Glow Cream or Bleach
-   - "boroneem talc" / "neem powder" → Nimson Boroneem Talcum Powder
-   - "vasojelly" → Nimson Vasojelly variants
-   - "petroleum jelly" / "pj" → Nimson Ayurvedic Petroleum Jelly
-   - "gulab jal" / "rose water" → Gulab Jal Premium Rose water
-   - "sunscreen" / "sunblock" → Sunscreen SPF 30 PA++
-   - "face wash" (generic) → ask for clarification, return null
-
-2. Weight/size matching:
-   - If caller mentions a size, prefer that variant: "90 ml", "180 ml", "500 ml", "100 gm", etc.
-   - If no size mentioned and multiple sizes exist, return null with candidates
-
-3. Confidence scoring:
-   - Exact match (including weight) → 0.9-1.0
-   - Product match, weight ambiguous → 0.7-0.85
-   - Generic or unclear → 0.0-0.6
-
-Return ONLY valid JSON:
-{"product_id": "<id or null>", "product_name": "<name or null>", "weight": "<weight or null>", "confidence": <0.0-1.0>, "candidates": []}
-"""
-
-ENTITY_USER_PROMPT = """Product mention: "{product_name}"
-Weight hint: "{weight_hint}"
-
-Match to catalog and return JSON."""
+def _normalise_weight(hint: str) -> str:
+    """Normalise caller weight hint to a consistent lookup string."""
+    h = hint.lower().strip()
+    return WEIGHT_ALIASES.get(h, h)
 
 
-def _build_product_catalog() -> str:
+def _db_conn():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _full_row(product_id: str) -> dict:
     try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT id, product_name, weight FROM products WHERE is_active=1 ORDER BY product_name, weight"
+        conn = _db_conn()
+        row  = conn.execute(
+            "SELECT * FROM products WHERE id=? AND is_active=1", (product_id,)
+        ).fetchone()
+        conn.close()
+        return dict(row) if row else {}
+    except Exception as e:
+        logger.error(f"[Entities] DB fetch failed for {product_id}: {e}")
+        return {}
+
+
+def _sql_match(product_name: str, weight_hint: str) -> list[dict]:
+    """
+    Return matching product rows from the DB using keyword search.
+    1. Resolve alias → canonical keyword.
+    2. LIKE-match on product_name.
+    3. If weight_hint given, prefer exact weight match first, fallback to all variants.
+    """
+    name_lc  = product_name.lower().strip()
+    keywords = []
+
+    # Try multi-word aliases first (longest match wins)
+    for alias in sorted(ALIAS_MAP, key=len, reverse=True):
+        if alias in name_lc:
+            keywords.append(ALIAS_MAP[alias])
+            break
+
+    # Fallback: use meaningful words from the raw name itself
+    if not keywords:
+        stop = {"ka", "ki", "ke", "hai", "kya", "wala", "wali", "waale",
+                "tel", "oil", "me", "mein", "aur", "or", "ek", "do"}
+        keywords = [w for w in re.split(r"\s+", name_lc) if len(w) > 2 and w not in stop]
+
+    if not keywords:
+        return []
+
+    try:
+        conn   = _db_conn()
+        clause = " AND ".join(f"LOWER(product_name) LIKE ?" for _ in keywords)
+        params = [f"%{k}%" for k in keywords]
+        rows   = conn.execute(
+            f"SELECT * FROM products WHERE {clause} AND is_active=1 ORDER BY product_name, weight",
+            params
         ).fetchall()
         conn.close()
-        
-        if not rows:
-            logger.warning("[Entities] No products in database")
-            return "No products loaded"
-        
-        lines = "\n".join(f"{r['id']} | {r['product_name']} | {r['weight']}" for r in rows)
-        logger.info(f"[Entities] Loaded {len(rows)} products")
-        return lines
+        return [dict(r) for r in rows]
     except Exception as e:
-        logger.error(f"[Entities] Catalog load failed: {e}")
-        return "Catalog load failed"
+        logger.error(f"[Entities] SQL match failed: {e}")
+        return []
 
 
-def _extract_json(text: str) -> dict:
-    text = text.strip()
-    clean = text
-    
-    if clean.startswith("```"):
-        clean = clean.split("\n", 1)[-1]
-    if clean.endswith("```"):
-        clean = clean.rsplit("```", 1)[0]
-    clean = clean.strip()
+def _pick_variant(rows: list[dict], weight_hint: str) -> dict | None:
+    """
+    Given a list of matching rows, pick the best weight variant.
+    Returns the matched row or None if ambiguous.
+    """
+    if not rows:
+        return None
+    if len(rows) == 1:
+        return rows[0]
 
-    try:
-        return json.loads(clean)
-    except json.JSONDecodeError:
-        pass
+    if not weight_hint:
+        return None  # multiple variants, no hint — caller must specify
 
-    start = clean.find("{")
-    if start == -1:
-        raise ValueError(f"No JSON found: {text[:120]!r}")
+    w = _normalise_weight(weight_hint).lower()
 
-    depth, in_str, escape = 0, False, False
-    end = -1
-    for i, ch in enumerate(clean[start:], start):
-        if escape:
-            escape = False
-            continue
-        if ch == "\\" and in_str:
-            escape = True
-            continue
-        if ch == '"':
-            in_str = not in_str
-            continue
-        if in_str:
-            continue
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                end = i
-                break
+    # Exact substring match on weight column
+    exact = [r for r in rows if w in (r.get("weight") or "").lower()]
+    if len(exact) == 1:
+        return exact[0]
+    if len(exact) > 1:
+        return exact[0]  # take closest
 
-    if end != -1:
-        try:
-            return json.loads(clean[start:end + 1])
-        except json.JSONDecodeError:
-            pass
+    # Fuzzy: try just the numeric part
+    digits = re.sub(r"[^\d]", "", w)
+    if digits:
+        digit_match = [r for r in rows if digits in re.sub(r"[^\d]", "", (r.get("weight") or ""))]
+        if digit_match:
+            return digit_match[0]
 
-    logger.warning("[Entities] Truncated JSON, attempting repair")
-    fragment = clean[start:]
-    open_braces = fragment.count("{") - fragment.count("}")
-    open_brackets = fragment.count("[") - fragment.count("]")
-    repaired = fragment + ("]" * max(open_brackets, 0)) + ("}" * max(open_braces, 0))
-    
-    try:
-        return json.loads(repaired)
-    except json.JSONDecodeError:
-        raise ValueError(f"Unrecoverable JSON: {text[:200]!r}")
+    return None
 
 
 class EntityResolver:
-    def __init__(self, model: str = "gemini-2.5-flash"):
-        self.model = model
-        self.client = _client
-        self._catalog = _build_product_catalog()
+    def __init__(self):
+        self._history: list[dict] = []
 
-    def resolve(self, raw_entities: dict, retries: int = 3, backoff: float = 2.0) -> dict:
+    def share_history(self, history: list[dict]) -> None:
+        self._history = history
+
+    def resolve(self, raw_entities: dict) -> dict:
         product_name = (raw_entities.get("product_name") or "").strip()
-        weight_hint = (raw_entities.get("weight_hint") or raw_entities.get("weight") or "").strip()
+        weight_hint  = (raw_entities.get("weight_hint") or raw_entities.get("weight") or "").strip()
 
         if not product_name:
-            logger.info("[Entities] No product name")
+            logger.info("[Entities] No product_name — returning empty")
             return self._empty(raw_entities)
 
-        for attempt in range(1, retries + 1):
-            try:
-                system = ENTITY_SYSTEM_PROMPT.format(product_catalog=self._catalog)
-                user = ENTITY_USER_PROMPT.format(
-                    product_name=product_name,
-                    weight_hint=weight_hint if weight_hint else "not specified",
-                )
+        rows = _sql_match(product_name, weight_hint)
 
-                response = self.client.models.generate_content(
-                    model=self.model,
-                    contents=user,
-                    config=types.GenerateContentConfig(
-                        system_instruction=system,
-                        temperature=0,
-                        max_output_tokens=512,
-                        response_mime_type="application/json",
-                    ),
-                )
+        if not rows:
+            logger.info(f"[Entities] No DB match for '{product_name}'")
+            return self._empty(raw_entities)
 
-                raw = response.text or ""
-                if not raw and response.candidates:
-                    raw = "".join(
-                        p.text for p in response.candidates[0].content.parts
-                        if hasattr(p, "text") and p.text
-                    )
+        picked = _pick_variant(rows, weight_hint)
 
-                result = _extract_json(raw)
-                product_id = result.get("product_id")
-                db_row = None
-                
-                if product_id:
-                    db_row = self._fetch_product(product_id)
+        if picked:
+            # Exact match — fetch full row for all pricing fields
+            full = _full_row(picked["id"])
+            resolved = {
+                "product_id":     full.get("id"),
+                "product_name":   full.get("product_name"),
+                "weight":         full.get("weight"),
+                "mrp_unit":       full.get("mrp_unit"),
+                "offer_rate":     full.get("offer_rate_new"),
+                "retail":         full.get("retail"),
+                "billing":        full.get("billing"),
+                "tax_18_percent": full.get("tax_18_percent"),
+                "tax_12_percent": full.get("tax_12_percent"),
+                "candidates":     [],
+                "confidence":     1.0,
+                "quantity":       raw_entities.get("quantity"),
+                "order_ref":      raw_entities.get("order_ref"),
+            }
+            logger.info(
+                f"[Entities] matched product_id={resolved['product_id']} "
+                f"name='{resolved['product_name']}' weight='{resolved['weight']}'"
+            )
+            return resolved
 
-                resolved = {
-                    "product_id": product_id,
-                    "product_name": db_row.get("product_name") if db_row else result.get("product_name"),
-                    "weight": db_row.get("weight") if db_row else result.get("weight"),
-                    "mrp_unit": db_row.get("mrp_unit") if db_row else None,
-                    "offer_rate": db_row.get("offer_rate_new") if db_row else None,
-                    "retail": db_row.get("retail") if db_row else None,
-                    "billing": db_row.get("billing") if db_row else None,
-                    "tax_18_percent": db_row.get("tax_18_percent") if db_row else None,
-                    "tax_12_percent": db_row.get("tax_12_percent") if db_row else None,
-                    "candidates": result.get("candidates", []),
-                    "confidence": result.get("confidence", 0.0),
-                    "quantity": raw_entities.get("quantity"),
-                    "order_ref": raw_entities.get("order_ref"),
-                }
+        # Multiple variants, no weight — return candidates so the agent can ask
+        candidates = [f"{r['id']}:{r['product_name']} {r.get('weight','')}" for r in rows]
+        logger.info(f"[Entities] ambiguous — {len(rows)} variants, weight needed")
+        return {
+            **self._empty(raw_entities),
+            "product_name": rows[0]["product_name"],
+            "candidates":   candidates,
+            "confidence":   0.7,
+        }
 
-                logger.info(
-                    f"[Entities] product_id={resolved['product_id']} "
-                    f"name='{resolved['product_name']}' weight='{resolved['weight']}' "
-                    f"mrp={resolved['mrp_unit']} retail={resolved['retail']} "
-                    f"confidence={resolved['confidence']:.2f}"
-                )
-                return resolved
-
-            except ServerError as e:
-                if attempt < retries:
-                    wait = backoff * attempt
-                    logger.warning(f"[Entities] Gemini 503 — retry {attempt}/{retries}")
-                    time.sleep(wait)
-                else:
-                    logger.error(f"[Entities] Gemini failed after {retries} attempts")
-                    return self._empty(raw_entities)
-
-            except Exception as e:
-                logger.error(f"[Entities] {type(e).__name__}: {e}")
-                return self._empty(raw_entities)
-
-        return self._empty(raw_entities)
-
-    def _fetch_product(self, product_id: str) -> dict:
-        try:
-            conn = sqlite3.connect(DB_PATH)
-            conn.row_factory = sqlite3.Row
-            row = conn.execute(
-                "SELECT * FROM products WHERE id=? AND is_active=1", (product_id,)
-            ).fetchone()
-            conn.close()
-            return dict(row) if row else {}
-        except Exception as e:
-            logger.error(f"[Entities] DB fetch failed for {product_id}: {e}")
-            return {}
+    def reset(self) -> None:
+        self._history.clear()
 
     def _empty(self, raw: dict = None) -> dict:
         return {
-            "product_id": None,
-            "product_name": None,
-            "weight": None,
-            "mrp_unit": None,
-            "offer_rate": None,
-            "retail": None,
-            "billing": None,
+            "product_id":     None,
+            "product_name":   None,
+            "weight":         None,
+            "mrp_unit":       None,
+            "offer_rate":     None,
+            "retail":         None,
+            "billing":        None,
             "tax_18_percent": None,
             "tax_12_percent": None,
-            "candidates": [],
-            "confidence": 0.0,
-            "quantity": raw.get("quantity") if raw else None,
-            "order_ref": raw.get("order_ref") if raw else None,
+            "candidates":     [],
+            "confidence":     0.0,
+            "quantity":       raw.get("quantity") if raw else None,
+            "order_ref":      raw.get("order_ref") if raw else None,
         }
