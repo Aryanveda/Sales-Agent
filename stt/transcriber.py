@@ -36,9 +36,9 @@ HINGLISH_PROMPT = (
     "charcoal face wash 60 ml, "
     "honey almond cream 100 gram, "
     "petroleum jelly 42 gram, "
-    "haan bhai order karo, "
+    "haan sir order karo, "
     "theek hai bilkul, "
-    "price batao yaar, "
+    "price batao sir, "
     "stock check karo, "
     "order confirm karo."
 )
@@ -84,6 +84,12 @@ class Transcriber:
     # ── Streaming / chunked transcription (live WebSocket call) ─────────────
 
     def transcribe_stream(self, audio_bytes: bytes) -> dict:
+        """
+        Process one audio chunk from the live call stream.
+        Uses previous turn's text as initial_prompt for continuity,
+        which drastically reduces Devanagari bleed between turns.
+        Returns same dict shape as transcribe().
+        """
         if not audio_bytes:
             return {"text": "", "language": "hinglish", "confidence": 0.0}
 
@@ -108,6 +114,10 @@ class Transcriber:
         return {"text": text, "language": language, "confidence": confidence}
 
     def set_context(self, agent_reply: str):
+        """
+        Call this after each agent TTS turn so the next STT chunk
+        has the agent's last words as context — improves continuity.
+        """
         if agent_reply:
             self._prev_text = agent_reply[-120:]
 
@@ -131,6 +141,10 @@ class Transcriber:
         return audio_array
 
     def _sanitise(self, text: str) -> str:
+        """
+        Strip any Devanagari characters that slip through despite the prompt.
+        Logs a warning so you know it happened.
+        """
         cleaned = "".join(
             c for c in text if not ('\u0900' <= c <= '\u097F')
         ).strip()

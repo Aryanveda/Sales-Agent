@@ -1,7 +1,9 @@
 import logging
 import uuid
+import os
+import requests as http_requests
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
-from fastapi.responses import Response
+from fastapi.responses import Response, JSONResponse
 
 load_dotenv = __import__('dotenv').load_dotenv
 load_dotenv(override=False)
@@ -12,10 +14,17 @@ from db.session_manager import SessionManager
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="AryanVeda Voice Agent")
+app      = FastAPI(title="AryanVeda Voice Agent")
 _agent   = None
-_sm      = None          # SessionManager (call.db)
+_sm      = None
 _sessions = {}
+
+SERVER_URL       = os.getenv("SERVER_URL", "http://localhost:8000")
+EXOTEL_SID       = os.getenv("EXOTEL_SID")
+EXOTEL_API_KEY   = os.getenv("EXOTEL_API_KEY")
+EXOTEL_API_TOKEN = os.getenv("EXOTEL_API_TOKEN")
+EXOTEL_NUMBER    = os.getenv("EXOTEL_NUMBER")
+EXOTEL_SUBDOMAIN = os.getenv("EXOTEL_SUBDOMAIN", "api.exotel.com")
 
 
 @app.on_event("startup")
@@ -32,28 +41,38 @@ async def health():
     return {"status": "ok", "agent": _agent is not None}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Exotel webhooks
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 @app.post("/exotel/incoming")
 async def exotel_incoming(request: Request):
     form     = await request.form()
     call_sid = form.get("CallSid", str(uuid.uuid4()))
     caller   = form.get("From", "unknown")
-    logger.info(f"Incoming call | SID={call_sid} | From={caller}")
+    context  = request.query_params.get("context", "")   # set by outbound_caller.py
+    direction = "outbound" if context else "inbound"
 
-    # Open a session row in call.db immediately
+    logger.info(f"{direction.title()} call | SID={call_sid} | From={caller} | context='{context}'")
+
     session_id = _sm.start_session(
-        phone         = caller,
-        direction     = "inbound",
+        phone            = caller,
+        direction        = direction,
         provider_call_id = call_sid,
     )
-    # Stash mapping so the websocket handler can look it up by call_sid
-    _sessions[call_sid] = {"db_session_id": session_id, "phone": caller}
+    _sessions[call_sid] = {
+        "db_session_id": session_id,
+        "phone":         caller,
+        "context":       context,
+    }
 
-    base_url = "ws://localhost:8000"
-    greeting = "Namaste! Main Skynet hoon, AryanVeda ka sales assistant. Kaise madad kar sakta hoon?"
+    base_url = SERVER_URL.replace("http://", "ws://").replace("https://", "wss://")
+
+    # Outbound greeting references context if set (e.g. "Follow up on last order")
+    if context:
+        greeting = f"Namaste! Main Skynet hoon, AryanVeda ka sales assistant. {context} ke baare mein baat karni thi."
+    else:
+        greeting = "Namaste! Main Skynet hoon, AryanVeda ka sales assistant. Kaise madad kar sakta hoon?"
 
     exoml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -70,40 +89,93 @@ async def exotel_status(request: Request):
     status   = form.get("CallStatus", "")
     logger.info(f"Call ended | SID={call_sid} | Status={status}")
 
-    # Close the session in call.db
     meta = _sessions.pop(call_sid, None)
     if meta:
         _sm.end_session(
-            session_id  = meta["db_session_id"],
+            session_id   = meta["db_session_id"],
             hangup_cause = status,
         )
-
     return Response(content="OK")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# WebSocket — live audio stream (one turn = one receive_bytes call)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# Outbound REST trigger  — POST /call/outbound  {"to": "+91XXXXXXXXXX", "context": "..."}
+# Lets you initiate a call directly from API without running outbound_caller.py
+# -----------------------------------------------------------------------------
+
+@app.post("/call/outbound")
+async def call_outbound(request: Request):
+    data    = await request.json()
+    to      = data.get("to", "").strip()
+    context = data.get("context", "")
+
+    if not to:
+        return JSONResponse({"error": "to number is required"}, status_code=400)
+
+    missing = [k for k, v in {
+        "EXOTEL_SID":       EXOTEL_SID,
+        "EXOTEL_API_KEY":   EXOTEL_API_KEY,
+        "EXOTEL_API_TOKEN": EXOTEL_API_TOKEN,
+        "EXOTEL_NUMBER":    EXOTEL_NUMBER,
+    }.items() if not v]
+    if missing:
+        return JSONResponse({"error": f"Missing .env keys: {', '.join(missing)}"}, status_code=500)
+
+    api_url = (
+        f"https://{EXOTEL_API_KEY}:{EXOTEL_API_TOKEN}"
+        f"@{EXOTEL_SUBDOMAIN}/v1/Accounts/{EXOTEL_SID}/Calls/connect.json"
+    )
+
+    webhook = f"{SERVER_URL}/exotel/incoming"
+    if context:
+        webhook += f"?context={http_requests.utils.quote(context)}"
+
+    payload = {
+        "From":           EXOTEL_NUMBER,
+        "To":             to,
+        "Url":            webhook,
+        "StatusCallback": f"{SERVER_URL}/exotel/status",
+        "CallType":       "trans",
+        "TimeLimit":      "300",
+        "TimeOut":        "30",
+    }
+
+    try:
+        resp = http_requests.post(api_url, data=payload, timeout=15)
+        resp.raise_for_status()
+        call_data = resp.json().get("Call", {})
+        logger.info(f"[Outbound] Dialled {to} | SID={call_data.get('Sid')} | Status={call_data.get('Status')}")
+        return {
+            "success":  True,
+            "to":       to,
+            "call_sid": call_data.get("Sid"),
+            "status":   call_data.get("Status"),
+        }
+    except Exception as e:
+        logger.error(f"[Outbound] Failed: {e}")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+# -----------------------------------------------------------------------------
+# WebSocket — live audio stream
+# -----------------------------------------------------------------------------
 
 @app.websocket("/call/{call_sid}")
 async def call_handler(websocket: WebSocket, call_sid: str):
     await websocket.accept()
     logger.info(f"WS connected | call_sid={call_sid}")
 
-    # Recover db_session_id created in /exotel/incoming
-    meta       = _sessions.get(call_sid, {})
-    db_sid     = meta.get("db_session_id")
-    phone      = meta.get("phone", "unknown")
+    meta      = _sessions.get(call_sid, {})
+    db_sid    = meta.get("db_session_id")
+    phone     = meta.get("phone", "unknown")
 
-    # In-memory agent session (ConversationMemory etc.)
     agent_session = _agent.new_session(
-        session_id   = call_sid,
-        db_session_id = db_sid,
-        phone        = phone,
+        session_id      = call_sid,
+        db_session_id   = db_sid,
+        phone           = phone,
         session_manager = _sm,
     )
 
-    # Mark call as in_progress
     if db_sid:
         _sm.update_status(db_sid, "in_progress")
 
@@ -134,16 +206,14 @@ async def call_handler(websocket: WebSocket, call_sid: str):
     except Exception as e:
         logger.error(f"Error | call_sid={call_sid} | {e}", exc_info=True)
     finally:
-        turns = agent_session["turn"]
-        logger.info(f"Call ended | call_sid={call_sid} | turns={turns}")
-        # Persist any remaining context; status will be set by /exotel/status
+        logger.info(f"Call ended | call_sid={call_sid} | turns={agent_session['turn']}")
         if db_sid:
             _sm.flush_memory(db_sid, agent_session["memory"])
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Test / dev routes  (unchanged behaviour, session_manager passed in)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# Test / dev routes
+# -----------------------------------------------------------------------------
 
 @app.post("/test/transcribe")
 async def test_transcribe(request: Request):
@@ -173,9 +243,12 @@ async def test_full(request: Request):
     session_id = data.get("session_id", "test")
 
     if session_id not in _sessions:
+        # Brand new session — reset NLU + entity state then create
+        _agent.intent_classifier.reset()
+        _agent.entity_resolver.reset()
         _sessions[session_id] = _agent.new_session(
             session_id      = session_id,
-            db_session_id   = None,   # no call.db row for test sessions
+            db_session_id   = None,
             phone           = "test",
             session_manager = None,
         )
@@ -191,7 +264,6 @@ async def test_full(request: Request):
         "turn":       session["turn"],
         "session_id": session_id,
     }
-
 
 @app.post("/test/reset")
 async def test_reset(request: Request):

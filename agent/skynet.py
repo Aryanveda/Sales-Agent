@@ -93,10 +93,6 @@ class Skynet:
             except Exception as e:
                 logger.warning(f"[Session] Could not load caller history: {e}")
 
-        # Reset NLU + entity state for the new session
-        self.intent_classifier.reset()
-        self.entity_resolver.reset()
-
         return {
             "session_id":      session_id,
             "db_session_id":   db_session_id,    # row id in call.db sessions table
@@ -121,7 +117,6 @@ class Skynet:
         logger.info(f"[STT] '{transcript}' (conf={stt_confidence:.2f})")
 
         session["turn"] += 1
-
         # NLU
         intent_result = self.intent_classifier.classify(transcript)
         intent        = intent_result["intent"]
@@ -270,6 +265,7 @@ class Skynet:
             previous_products      = ", ".join(context.get("products_discussed", [])) or "none",
             last_intent            = context.get("last_intent") or "none",
             turn                   = context.get("turn"),
+            transcript             = transcript,
             intent                 = intent,
             product_name           = entities.get("product_name") or "not specified",
             weight                 = entities.get("weight") or "not specified",
@@ -280,7 +276,7 @@ class Skynet:
 
         # If entity resolution returned multiple candidates (ambiguous weight),
         # build a clarification response directly — no need to call Gemini.
-        candidates = entities.get("candidates", [])
+        candidates = entities.get("candidates") or []
         if candidates and not entities.get("product_id"):
             # Extract clean weight list from candidate strings  "id:Name Weight"
             weights = []
@@ -325,11 +321,22 @@ class Skynet:
                 logger.warning("[Response] Gemini returned empty text — using fallback")
                 return {"response": self._fallback_response(intent, entities), "followup": None}
 
+            # Strip markdown fences if present
             if raw_text.startswith("```"):
                 raw_text = raw_text.split("```")[1]
                 if raw_text.startswith("json"):
                     raw_text = raw_text[4:]
                 raw_text = raw_text.strip()
+
+            # Extract just the JSON object — ignore any text outside braces
+            start = raw_text.find("{")
+            end   = raw_text.rfind("}")
+            if start != -1 and end != -1:
+                raw_text = raw_text[start:end + 1]
+
+            # Sanitise characters that break JSON parsing
+            # Rupee symbol ₹ inside a JSON string value causes parse errors
+            raw_text = raw_text.replace("₹", "rupaye ")
 
             result        = json.loads(raw_text)
             response_text = result.get("response", "Samajh nahi aaya, ek baar phir se batao.")
@@ -344,6 +351,15 @@ class Skynet:
 
         except json.JSONDecodeError as e:
             logger.error(f"[Response] JSON parse failed: {e}")
+            # For confirm after order — give a clean close instead of generic fallback
+            if intent == "confirm":
+                product = entities.get("product_name", "product")
+                weight  = entities.get("weight", "")
+                qty     = entities.get("quantity", "")
+                return {
+                    "response": f"Bilkul sir! {qty} piece {product} {weight} ka order confirm ho gaya. Shukriya ji!",
+                    "followup": None,
+                }
             return {"response": self._fallback_response(intent, entities), "followup": None}
 
         except Exception as e:
@@ -356,14 +372,14 @@ class Skynet:
         qty     = entities.get("quantity", "")
 
         fallbacks = {
-            "check_stock": f"Bhai, {product} {weight} stock mein available hai. Order karo?",
-            "get_price":   f"{product} {weight} ka MRP rupaye batata hoon ek second.",
-            "place_order": f"Bilkul! {qty} piece {product} {weight} order confirm kar du?",
-            "list_skus":   "Hamare paas bahut products hain. Kaunsa chahiye?",
-            "confirm":     "Theek hai bhai, order process ho raha hai.",
-            "deny":        "Koi baat nahi. Aur kuch chahiye?",
-            "escalate":    "Manager ko bulata hun ek second.",
-            "end_call":    "Shukriya! AryanVeda mein call karne ke liye.",
-            "unknown":     "Samajh nahi aaya. Ek baar phir se batao.",
+            "check_stock": f"{product} {weight} stock mein available hai sir. Order karte hain?",
+            "get_price":   f"{product} {weight} ka MRP main abhi batata hoon sir.",
+            "place_order": f"Zaroor sir! {qty} piece {product} {weight} ka order confirm kar doon?",
+            "list_skus":   "Hamare paas bahut products hain sir. Kaunsa product chahiye aapko?",
+            "confirm":     "Theek hai sir, order process ho raha hai. Shukriya ji!",
+            "deny":        "Koi baat nahi sir. Aur kuch chahiye aapko?",
+            "escalate":    "Zaroor sir, manager se connect karta hoon aapko. Ek moment please.",
+            "end_call":    "Shukriya ji! AryanVeda mein call karne ke liye. Aapka din accha ho sir!",
+            "unknown":     "Namaste sir! Main Skynet hoon, AryanVeda ka assistant. Kaise madad kar sakta hoon aapki?",
         }
-        return fallbacks.get(intent, "Ek second, samajhta hoon kya kehna chahte ho.")
+        return fallbacks.get(intent, "Namaste! AryanVeda mein aapka swagat hai. Kaise madad kar sakta hoon?")
