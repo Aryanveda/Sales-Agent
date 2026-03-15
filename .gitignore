@@ -1,1 +1,30 @@
-D:\Aryanveda Groups\env
+# Virtual environment
+env/
+env
+
+# Environment variables
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Database files
+*.db
+
+# Whisper model cache
+stt/model/
+
+# Audio recordings (large files)
+data/recordings/*.wav
+data/recordings/*.mp4
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
