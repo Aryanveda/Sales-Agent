@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 
 load_dotenv(override=False)
 
-DB_PATH      = os.getenv("DB_PATH",      "aryaveda.db")
+DB_PATH      = os.getenv("DB_PATH",      "aryanveda.db")
 CALLS_DB_PATH = os.getenv("CALLS_DB_PATH", os.path.join(os.path.dirname(DB_PATH), "call.db"))
 
 HERE = os.path.dirname(__file__)
@@ -34,7 +34,7 @@ def get_conn(path):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# aryaveda.db  (products)
+# aryanveda.db  (products)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_schema():
@@ -119,6 +119,6 @@ if __name__ == "__main__":
     run("Verifying tables",      verify_calls)
 
     print("\nAll databases ready!")
-    print("119 products loaded into aryaveda.db")
+    print("119 products loaded into aryanveda.db")
     print("call.db initialised with 6 tables (callers, sessions, transcripts,")
     print("       session_context, caller_memory, call_events)\n")
