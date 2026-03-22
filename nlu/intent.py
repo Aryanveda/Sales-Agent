@@ -5,6 +5,7 @@ import time
 from google import genai
 from google.genai import types
 from google.genai.errors import ServerError
+
 try:
     from httpx import RemoteProtocolError as _RemoteProtocolError
 except ImportError:
@@ -13,14 +14,12 @@ except ImportError:
 load_dotenv = __import__('dotenv').load_dotenv
 load_dotenv(override=False)
 
-# Import the richer prompt from the single source of truth
 from agent.prompt import INTENT_SYSTEM_PROMPT, INTENT_USER_PROMPT
 
-logger = logging.getLogger(__name__)
+logger  = logging.getLogger(__name__)
 _client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 HISTORY_WINDOW = 20
-
 
 def _extract_json(text: str) -> dict:
     clean = text.strip()
@@ -44,7 +43,6 @@ def _extract_text(response) -> str:
                 raw += part.text
     return raw
 
-
 class IntentClassifier:
     def __init__(self, model: str = "gemini-2.5-flash"):
         self.model   = model
@@ -61,12 +59,12 @@ class IntentClassifier:
         for attempt in range(1, retries + 1):
             try:
                 response = self.client.models.generate_content(
-                    model   = self.model,
+                    model    = self.model,
                     contents = prompt,
-                    config  = types.GenerateContentConfig(
+                    config   = types.GenerateContentConfig(
                         system_instruction = INTENT_SYSTEM_PROMPT,
                         temperature        = 1,
-                        max_output_tokens  = 500,
+                        max_output_tokens  = 150,
                         thinking_config    = types.ThinkingConfig(thinking_budget=0),
                     ),
                 )
@@ -81,10 +79,10 @@ class IntentClassifier:
 
             except (ServerError, _RemoteProtocolError, ConnectionError):
                 if attempt < retries:
-                    logger.warning(f"[NLU] Gemini connection error — retry {attempt}/{retries}")
+                    logger.warning(f"[NLU] Connection error, retry {attempt}/{retries}")
                     time.sleep(backoff * attempt)
                 else:
-                    logger.error(f"[NLU] Gemini failed after {retries} attempts")
+                    logger.error(f"[NLU] Failed after {retries} attempts")
                     return self._empty()
 
             except Exception as e:
@@ -102,18 +100,12 @@ class IntentClassifier:
         logger.info("[NLU] Session reset")
 
     def _build_prompt(self, transcript: str) -> str:
-        """
-        Builds the full prompt:
-        - Conversation history (last HISTORY_WINDOW turns) for coreference resolution
-        - INTENT_USER_PROMPT for the current transcript
-        """
         recent = self._history[-HISTORY_WINDOW:]
         lines  = ["=== CONVERSATION HISTORY ==="]
         for turn in recent:
             tag = "[caller]" if turn["role"] == "caller" else "[agent] "
             lines.append(f"{tag}: {turn['text']}")
         lines.append("")
-        # Append the structured user prompt from prompt.py
         lines.append(INTENT_USER_PROMPT.format(transcript=transcript))
         return "\n".join(lines)
 
@@ -121,11 +113,6 @@ class IntentClassifier:
         return {
             "intent":     "unknown",
             "confidence": 0.0,
-            "entities": {
-                "product_name": None,
-                "weight_hint":  None,
-                "quantity":     None,
-                "order_ref":    None,
-            },
-            "language": "hinglish",
+            "entities":   {"product_name": None, "weight_hint": None, "quantity": None, "order_ref": None},
+            "language":   "hinglish",
         }

@@ -17,309 +17,288 @@ from google.genai import types
 load_dotenv = __import__('dotenv').load_dotenv
 load_dotenv(override=False)
 
-logger = logging.getLogger(__name__)
+logger  = logging.getLogger(__name__)
 _client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 
-# ================= MEMORY =================
-
 class ConversationMemory:
     def __init__(self, session_id: str):
-        self.session_id = session_id
-        self.turn = 0
-        self.history: List[Dict] = []
+        self.session_id      = session_id
+        self.turn            = 0
+        self.history:        List[Dict] = []
+        self.current_product: Optional[str] = None
+        self.current_weight:  Optional[str] = None
+        self.caller_history:  List[Dict] = []
 
-        self.current_product = None
-        self.current_weight = None
-
-    def update(self, transcript, intent, entity):
+    def update(self, transcript: str, intent: str, entity: dict):
         self.turn += 1
-
         if entity.get("product_name"):
             self.current_product = entity["product_name"]
-
         if entity.get("weight"):
             self.current_weight = entity["weight"]
-
         self.history.append({
-            "turn": self.turn,
-            "text": transcript,
-            "intent": intent,
+            "turn":    self.turn,
+            "text":    transcript,
+            "intent":  intent,
             "product": self.current_product,
-            "weight": self.current_weight
+            "weight":  self.current_weight,
         })
 
-    def context(self):
+    def context(self) -> dict:
         return {
-            "history": self.history,
+            "history":         self.history,
             "current_product": self.current_product,
-            "current_weight": self.current_weight
+            "current_weight":  self.current_weight,
         }
 
-
-# ================= SKYNET =================
 
 class Skynet:
     def __init__(self):
         logger.info("[Agent] Initializing Skynet...")
-
-        self.transcriber = Transcriber()
+        self.transcriber       = Transcriber()
         self.intent_classifier = IntentClassifier()
-        self.entity_resolver = EntityResolver()
-        self.tts = TTSPipeline()
-        self._client = _client
+        self.entity_resolver   = EntityResolver()
+        self.tts               = TTSPipeline()
+        self._client           = _client
 
-        DB_PATH = os.getenv("DB_PATH", "aryanveda.db")
-
+        DB_PATH   = os.getenv("DB_PATH", "db/aryaveda.db")
         self.conn = sqlite3.connect(DB_PATH, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
 
-        # Load structured knowledge
-        self.knowledge_base = self._load_knowledge()
-
-        logger.info(f"[DB] Connected → {DB_PATH}")
-        logger.info(f"[KG] Loaded {len(self.knowledge_base)} products")
+        logger.info(f"[DB] Connected to {DB_PATH}")
         logger.info("[Agent] Skynet ready.")
 
-
-    # ================= KNOWLEDGE PARSER =================
-
-    def _load_knowledge(self):
-        path = os.path.join(os.path.dirname(__file__), "knowledge.txt")
-
-        if not os.path.exists(path):
-            logger.warning("[KG] knowledge.txt not found")
-            return []
-
-        with open(path, encoding="utf-8") as f:
-            raw = f.read()
-
-        blocks = raw.split("================================================================================")
-
-        structured = []
-
-        for block in blocks:
-            block = block.strip()
-            if not block:
-                continue
-
-            try:
-                if "PRODUCT:" not in block:
-                    continue
-
-                # extract name ONLY for matching
-                product_name = block.split("PRODUCT:")[1].split("\n")[0].strip().lower()
-
-                structured.append({
-                    "product_name": product_name,
-                    "raw_text": block   # ← FULL BLOCK PRESERVED
-                })
-
-            except Exception as e:
-                logger.warning(f"[KG] parsing failed: {e}")
-
-        return structured
-    
-    def _knowledge_fetch(self, product_name: Optional[str]):
-        if not product_name:
-            return None
-
-        pname = product_name.lower()
-
-        pname = pname.replace("tel", "oil").replace("badam", "almond")
-
-        pname_tokens = set(pname.split())
-
-        best_score = 0
-        best_match = None
-
-        for item in self.knowledge_base:
-            kname = item["product_name"]
-            k_tokens = set(kname.split())
-
-            common = pname_tokens.intersection(k_tokens)
-
-            if not common:
-                continue
-
-            score = len(common) / len(pname_tokens)
-
-            if score > best_score:
-                best_score = score
-                best_match = item
-
-        if best_score < 0.3:
-            return None
-
-        return best_match["raw_text"] if best_match else None
-
-    def _format_knowledge(self, knowledge):
-        if not knowledge:
-            return "No additional product knowledge available."
-
-        return knowledge
-
-    # ================= DB FETCH =================
-
-    def _db_fetch(self, query_text: str):
+    def _db_fetch(self, query_text: str) -> List[Dict]:
         try:
-            rows = self.conn.execute("""
-                SELECT product_name, weight, mrp_unit, retail
-                FROM products
-                WHERE LOWER(product_name) LIKE LOWER(?)
-                LIMIT 20
-            """, (f"%{query_text}%",)).fetchall()
-
-            grouped = {}
-
+            rows = self.conn.execute(
+                "SELECT product_name, weight, mrp_unit, retail FROM products "
+                "WHERE LOWER(product_name) LIKE LOWER(?) AND is_active=1 LIMIT 20",
+                (f"%{query_text}%",)
+            ).fetchall()
+            grouped: Dict[str, Dict] = {}
             for r in rows:
-                pname = r["product_name"]
-
-                if pname not in grouped:
-                    grouped[pname] = {
-                        "product_name": pname,
-                        "variants": [],
-                        "pricing": []
-                    }
-
+                p = r["product_name"]
+                if p not in grouped:
+                    grouped[p] = {"product_name": p, "variants": [], "pricing": []}
                 if r["weight"]:
-                    grouped[pname]["variants"].append(r["weight"])
-
-                grouped[pname]["pricing"].append({
+                    grouped[p]["variants"].append(r["weight"])
+                grouped[p]["pricing"].append({
                     "weight": r["weight"],
-                    "mrp": r["mrp_unit"],
-                    "retail": r["retail"]
+                    "mrp":    r["mrp_unit"],
+                    "retail": r["retail"],
                 })
-
             return list(grouped.values())[:5]
-
         except Exception as e:
             logger.warning(f"[DB] Fetch failed: {e}")
             return []
 
+    def _build_conversation(self, history: List[Dict]) -> str:
+        if not history:
+            return "No prior turns."
+        lines = []
+        for h in history:
+            lines.append(
+                f"[Turn {h['turn']}] User: {h['text']} | "
+                f"Product: {h['product'] or 'none'} | Weight: {h['weight'] or 'none'}"
+            )
+        return "\n".join(lines)
 
-    # ================= SESSION =================
-
-    def new_session(self, session_id: str, db_session_id=None, session_manager=None, **kwargs):
+    def new_session(self, session_id: str, db_session_id=None,
+                    phone: str = "unknown", session_manager=None, **kwargs) -> dict:
+        memory = ConversationMemory(session_id)
+        if session_manager and phone and phone != "unknown":
+            try:
+                memory.caller_history = session_manager.get_caller_history(phone, n=3)
+            except Exception as e:
+                logger.warning(f"[Session] Could not load caller history: {e}")
+        self.intent_classifier.reset()
+        self.entity_resolver.reset()
         return {
-            "session_id": session_id,
-            "turn": 0,
-            "memory": ConversationMemory(session_id),
-            "db_session_id": db_session_id,
-            "session_manager": session_manager
+            "session_id":      session_id,
+            "db_session_id":   db_session_id,
+            "phone":           phone,
+            "turn":            0,
+            "memory":          memory,
+            "session_manager": session_manager,
+            "last_language":   "hinglish",
         }
 
+    def run_turn(self, audio_bytes: bytes, session: dict) -> dict:
+        t0     = time.time()
+        result = self.transcriber.transcribe_stream(audio_bytes)
+        text   = result["text"]
+        conf   = result["confidence"]
+        logger.info(f"[STT] '{text}' conf={conf:.2f}")
 
-    # ================= MAIN =================
+        out   = self._process_turn(text, session)
+        # Merge response and followup into one TTS call — halves ElevenLabs round trips
+        full_text = out["response_text"]
+        if out.get("followup_text"):
+            full_text = full_text.rstrip() + " " + out["followup_text"]
+        audio = self.tts.synthesizer.speak(full_text)
 
-    def run_turn_text(self, text: str, session: dict):
-        t0 = time.time()
+        out["audio_bytes"] = audio
+        out["latency_ms"]  = int((time.time() - t0) * 1000)
+        out["end_call"]    = out.get("intent") == "end_call"
 
+        self.transcriber.set_context(out["response_text"])
+        self._persist_turn(session, text, conf, out["response_text"],
+                           out.get("followup_text", ""), out["intent"])
+        return out
+
+    def run_turn_text(self, text: str, session: dict) -> dict:
+        t0  = time.time()
+        out = self._process_turn(text, session)
+        out["latency_ms"] = int((time.time() - t0) * 1000)
+        return out
+
+    def _process_turn(self, text: str, session: dict) -> dict:
+        from concurrent.futures import ThreadPoolExecutor
         memory = session["memory"]
         session["turn"] += 1
 
+        # Step 1: NLU — must be first, everything depends on it
         intent_result = self.intent_classifier.classify(text)
-        intent = intent_result["intent"]
+        intent        = intent_result["intent"]
+        language      = intent_result.get("language", "hinglish")
+        session["last_language"] = language
 
-        entity_result = self.entity_resolver.resolve(intent_result["entities"])
+        # Step 2: Entity resolve + DB fetch in parallel
+        # DB fetch only needs the raw product hint from NLU, not the resolved entity
+        raw_product_hint = (intent_result["entities"].get("product_name") or
+                           memory.current_product or text)
 
-        # -------- CONTEXT RECOVERY --------
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            entity_future = pool.submit(self.entity_resolver.resolve, intent_result["entities"])
+            db_future     = pool.submit(self._db_fetch, raw_product_hint)
+            entity_result = entity_future.result()
+            db_data       = db_future.result()
+
+        # Context recovery — carry forward if caller used a reference
         if not entity_result.get("product_name"):
             entity_result["product_name"] = memory.current_product
-
         if not entity_result.get("weight"):
             entity_result["weight"] = memory.current_weight
 
         product_name = entity_result.get("product_name")
 
-        # -------- HYBRID FETCH --------
-        db_data = self._db_fetch(product_name or text)
-        knowledge = self._knowledge_fetch(product_name)
-
         response = self._generate_response(
-            transcript=text,
-            db_data=db_data,
-            knowledge=knowledge,
-            entity=entity_result,
-            memory=memory
+            transcript = text,
+            db_data    = db_data,
+            entity     = entity_result,
+            memory     = memory,
+            language   = language,
         )
 
         memory.update(text, intent, entity_result)
+        self.intent_classifier.add_agent_turn(response["response"])
+        self.entity_resolver.share_history(memory.history)
+
+        sm     = session.get("session_manager")
+        db_sid = session.get("db_session_id")
+        if sm and db_sid:
+            try:
+                sm.set_context(db_sid, "last_intent",   intent)
+                sm.set_context(db_sid, "last_product",  product_name or "")
+                sm.set_context(db_sid, "last_language", language)
+            except Exception as e:
+                logger.warning(f"[DB] context save failed: {e}")
 
         return {
-            "transcript": text,
-            "intent": intent,
-            "entities": entity_result,
+            "transcript":    text,
+            "intent":        intent,
+            "entities":      entity_result,
             "response_text": response["response"],
             "followup_text": response.get("followup"),
-            "latency_ms": int((time.time() - t0) * 1000),
         }
 
-
-    # ================= RESPONSE =================
-
-    def _generate_response(self, transcript, db_data, knowledge, entity, memory):
+    def _generate_response(self, transcript: str, db_data: list,
+                           entity: dict, memory: ConversationMemory, language: str) -> dict:
         from datetime import datetime, timezone, timedelta
-
-        IST = timezone(timedelta(hours=5, minutes=30))
-        now = datetime.now(IST)
-
+        IST     = timezone(timedelta(hours=5, minutes=30))
+        now     = datetime.now(IST)
         context = memory.context()
 
         prompt = RESPONSE_TEMPLATE.format(
-            conversation_transcript=self._build_conversation(context["history"]),
-            transcript=transcript,
-            db_data=json.dumps(db_data),
-            knowledge=self._format_knowledge(knowledge),
-            current_state=json.dumps({
+            conversation_transcript = self._build_conversation(context["history"]),
+            transcript              = transcript,
+            db_data                 = json.dumps(db_data, ensure_ascii=False),
+            current_state           = json.dumps({
                 "product": context["current_product"],
-                "weight": context["current_weight"]
+                "weight":  context["current_weight"],
             }),
-            current_date=now.strftime("%A, %d %B %Y"),
-            current_time=now.strftime("%I:%M %p IST"),
-            caller_language="hinglish",
+            current_date    = now.strftime("%A, %d %B %Y"),
+            current_time    = now.strftime("%I:%M %p IST"),
+            caller_language = language,
         )
 
         try:
             response = self._client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=SYSTEM_PROMPT,
-                    temperature=0.3,
-                    response_mime_type="application/json",
-                )
+                model    = "gemini-2.5-flash",
+                contents = prompt,
+                config   = types.GenerateContentConfig(
+                    system_instruction = SYSTEM_PROMPT,
+                    temperature        = 0.4,
+                    max_output_tokens  = 400,
+                    thinking_config    = types.ThinkingConfig(thinking_budget=0),
+                    response_mime_type = "application/json",
+                ),
             )
-
-            raw = getattr(response, "text", "").strip()
+            raw = (getattr(response, "text", "") or "").strip()
+            raw = raw.replace("₹", "rupaye ")
 
             start = raw.find("{")
-            end = raw.rfind("}")
+            end   = raw.rfind("}")
             if start != -1 and end != -1:
                 raw = raw[start:end + 1]
 
             try:
-                return json.loads(raw)
-            except:
-                return {
-                    "response": "Samajh gaya sir — main aapko detail mein samjhata hoon.",
-                    "followup": None
-                }
-                
+                result = json.loads(raw)
+                logger.info(f"[Response] '{result.get('response','')[:80]}'")
+                return result
+            except json.JSONDecodeError:
+                def _extract(key, text):
+                    idx = text.find(f'"{key}"')
+                    if idx == -1:
+                        return None
+                    after = text[idx + len(key) + 2:]
+                    colon = after.find(":")
+                    if colon == -1:
+                        return None
+                    after = after[colon + 1:].strip().lstrip('"')
+                    end   = after.find('",')
+                    if end == -1:
+                        end = after.rfind('"')
+                    return after[:end].strip() if end != -1 else after.strip()
+                r = _extract("response", raw)
+                f = _extract("followup", raw)
+                if r:
+                    return {"response": r, "followup": f}
+                return self._fallback(entity)
+
         except Exception as e:
             logger.error(f"[LLM] Failed: {e}")
-            return {
-                "response": "Sir main samajh gaya, ek baar dobara batata hoon.",
-                "followup": None
-            }
+            return self._fallback(entity)
 
+    def _persist_turn(self, session: dict, transcript: str, confidence: float,
+                      response: str, followup: str, intent: str):
+        sm     = session.get("session_manager")
+        db_sid = session.get("db_session_id")
+        if not sm or not db_sid:
+            return
+        idx = session["turn"] - 1
+        try:
+            sm.save_turn(db_sid, idx,     "caller", transcript, confidence)
+            sm.save_turn(db_sid, idx + 1, "agent",
+                         response + (" " + followup if followup else ""))
+            sm.set_context(db_sid, "last_intent", intent)
+        except Exception as e:
+            logger.warning(f"[DB] turn persist failed: {e}")
 
-    # ================= HELPERS =================
-
-    def _build_conversation(self, history):
-        lines = []
-        for h in history[-10:]:
-            lines.append(
-                f"[Turn {h['turn']}] User: {h['text']} | Product: {h['product']} | Weight: {h['weight']}"
-            )
-        return "\n".join(lines)
+    def _fallback(self, entity: dict) -> dict:
+        p = entity.get("product_name") or ""
+        return {
+            "response": f"Haan sir, {p} ke baare mein batata hoon.".strip() if p
+                        else "Haan sir, aap kya jaanna chahte hain?",
+            "followup": "Kaunsa size ya variant dekhna chahenge?",
+        }
