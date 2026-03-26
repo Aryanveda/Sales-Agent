@@ -29,13 +29,16 @@ class ConversationMemory:
         self.current_product: Optional[str] = None
         self.current_weight:  Optional[str] = None
         self.caller_history:  List[Dict] = []
+        self.customer_type:   Optional[str] = None  # "retailer" | "distributor" | "super"
 
-    def update(self, transcript: str, intent: str, entity: dict):
+    def update(self, transcript: str, intent: str, entity: dict, customer_type: Optional[str] = None):
         self.turn += 1
         if entity.get("product_name"):
             self.current_product = entity["product_name"]
         if entity.get("weight"):
             self.current_weight = entity["weight"]
+        if customer_type:
+            self.customer_type = customer_type
         self.history.append({
             "turn":    self.turn,
             "text":    transcript,
@@ -49,6 +52,7 @@ class ConversationMemory:
             "history":         self.history,
             "current_product": self.current_product,
             "current_weight":  self.current_weight,
+            "customer_type":   self.customer_type,
         }
 
 
@@ -61,7 +65,7 @@ class Skynet:
         self.tts               = TTSPipeline()
         self._client           = _client
 
-        DB_PATH   = os.getenv("DB_PATH", "db/aryaveda.db")
+        DB_PATH   = os.getenv("DB_PATH", "db/aryanveda.db")
         self.conn = sqlite3.connect(DB_PATH, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
 
@@ -71,8 +75,12 @@ class Skynet:
     def _db_fetch(self, query_text: str) -> List[Dict]:
         try:
             rows = self.conn.execute(
-                "SELECT product_name, weight, mrp_unit, retail FROM products "
-                "WHERE LOWER(product_name) LIKE LOWER(?) AND is_active=1 LIMIT 20",
+                "SELECT p.id, p.product_name, p.weight, "
+                "p.mrp_unit, p.super_total, p.distributor_total, p.retail, "
+                "COALESCE(i.closing_stock, -1) AS closing_stock "
+                "FROM products p "
+                "LEFT JOIN inventory i ON i.product_id = p.id "
+                "WHERE LOWER(p.product_name) LIKE LOWER(?) AND p.is_active=1 LIMIT 20",
                 (f"%{query_text}%",)
             ).fetchall()
             grouped: Dict[str, Dict] = {}
@@ -83,9 +91,12 @@ class Skynet:
                 if r["weight"]:
                     grouped[p]["variants"].append(r["weight"])
                 grouped[p]["pricing"].append({
-                    "weight": r["weight"],
-                    "mrp":    r["mrp_unit"],
-                    "retail": r["retail"],
+                    "weight":            r["weight"],
+                    "mrp_unit":          r["mrp_unit"],
+                    "super_total":       r["super_total"],
+                    "distributor_total": r["distributor_total"],
+                    "retail":            r["retail"],
+                    "closing_stock":     r["closing_stock"] if r["closing_stock"] >= 0 else None,
                 })
             return list(grouped.values())[:5]
         except Exception as e:
@@ -183,14 +194,15 @@ class Skynet:
         product_name = entity_result.get("product_name")
 
         response = self._generate_response(
-            transcript = text,
-            db_data    = db_data,
-            entity     = entity_result,
-            memory     = memory,
-            language   = language,
+            transcript    = text,
+            db_data       = db_data,
+            entity        = entity_result,
+            memory        = memory,
+            language      = language,
         )
 
-        memory.update(text, intent, entity_result)
+        customer_type = response.get("customer_type") or memory.customer_type
+        memory.update(text, intent, entity_result, customer_type=customer_type)
         self.intent_classifier.add_agent_turn(response["response"])
         self.entity_resolver.share_history(memory.history)
 
@@ -224,8 +236,9 @@ class Skynet:
             transcript              = transcript,
             db_data                 = json.dumps(db_data, ensure_ascii=False),
             current_state           = json.dumps({
-                "product": context["current_product"],
-                "weight":  context["current_weight"],
+                "product":       context["current_product"],
+                "weight":        context["current_weight"],
+                "customer_type": context["customer_type"],
             }),
             current_date    = now.strftime("%A, %d %B %Y"),
             current_time    = now.strftime("%I:%M %p IST"),
@@ -299,6 +312,6 @@ class Skynet:
         p = entity.get("product_name") or ""
         return {
             "response": f"Haan sir, {p} ke baare mein batata hoon.".strip() if p
-                        else "Haan sir, aap kya jaanna chahte hain?",
-            "followup": "Kaunsa size ya variant dekhna chahenge?",
+                        else "Haan sir, batao — main kya madad kar sakta hoon?",
+            "followup": "Kaunsa product ya size dekhna tha aapko?",
         }

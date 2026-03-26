@@ -12,7 +12,7 @@ load_dotenv(override=False)
 from agent.prompt import ENTITY_SYSTEM_PROMPT, ENTITY_USER_PROMPT
 
 logger  = logging.getLogger(__name__)
-DB_PATH = os.getenv("DB_PATH", "db/aryaveda.db")
+DB_PATH = os.getenv("DB_PATH", "db/aryanveda.db")
 
 _client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 

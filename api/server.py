@@ -3,7 +3,7 @@ import uuid
 import os
 import requests as http_requests
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
-from fastapi.responses import Response, JSONResponse
+from fastapi.responses import Response, JSONResponse, FileResponse
 
 load_dotenv = __import__('dotenv').load_dotenv
 load_dotenv(override=False)
@@ -41,6 +41,14 @@ async def health():
     return {"status": "ok", "agent": _agent is not None}
 
 
+@app.get("/")
+async def serve_ui():
+    ui_path = os.path.join(os.path.dirname(__file__), "..", "voice.html")
+    if not os.path.exists(ui_path):
+        ui_path = "voice.html"
+    return FileResponse(ui_path, media_type="text/html")
+
+
 # -----------------------------------------------------------------------------
 # Exotel webhooks
 # -----------------------------------------------------------------------------
@@ -76,7 +84,7 @@ async def exotel_incoming(request: Request):
 
     exoml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say voice="female" language="hi-IN">{greeting}</Say>
+    <Say voice="Male" language="hi-IN">{greeting}</Say>
     <Stream url="{base_url}/call/{call_sid}" bidirectional="true" />
 </Response>"""
     return Response(content=exoml, media_type="application/xml")

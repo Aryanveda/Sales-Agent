@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Nimson — Voice Agent</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=Inter:wght@400;500&display=swap" rel="stylesheet"/>
+<style>
+:root {
+  --bg:           #ffffff;
+  --surface:      #f9f9f9;
+  --surface2:     #f1f1f1;
+  --border:       #e4e4e4;
+  --accent:       #cc0000;
+  --accent-dim:   rgba(204,0,0,0.07);
+  --text:         #111111;
+  --text-2:       #555555;
+  --muted:        #999999;
+  --user-bg:      #fff5f5;
+  --user-border:  #ffcccc;
+  --agent-bg:     #f9f9f9;
+  --agent-border: #e4e4e4;
+  --green:        #16a34a;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+
+body {
+  font-family: 'Inter', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* Header */
+header {
+  width: 100%; max-width: 680px;
+  padding: 20px 24px 0;
+  flex-shrink: 0;
+}
+.header-inner {
+  display: flex; align-items: center; justify-content: space-between;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+.brand {
+  font-family: 'Syne', sans-serif;
+  font-weight: 800; font-size: 20px;
+  letter-spacing: -0.5px; color: var(--accent);
+}
+.brand span { color: var(--text); }
+.header-right { display: flex; align-items: center; gap: 10px; }
+.status-pill {
+  display: flex; align-items: center; gap: 6px;
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 20px; padding: 4px 10px;
+  font-size: 11px; font-weight: 500; color: var(--text-2);
+}
+.dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--muted); flex-shrink: 0;
+  transition: background 0.3s, box-shadow 0.3s;
+}
+.dot.online    { background: var(--green); box-shadow: 0 0 0 2px rgba(22,163,74,0.2); }
+.dot.recording { background: var(--accent); box-shadow: 0 0 0 2px rgba(204,0,0,0.2);
+                 animation: pulse 1s ease-in-out infinite; }
+@keyframes pulse {
+  0%,100% { transform: scale(1);   opacity: 1; }
+  50%      { transform: scale(1.4); opacity: 0.6; }
+}
+#reset-btn {
+  width: 32px; height: 32px; background: none;
+  border: 1px solid var(--border); border-radius: 8px;
+  color: var(--muted); font-size: 15px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: all 0.15s;
+}
+#reset-btn:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
+
+/* Chat */
+#chat {
+  width: 100%; max-width: 680px; flex: 1;
+  overflow-y: auto; padding: 20px 24px;
+  display: flex; flex-direction: column; gap: 16px;
+}
+#chat::-webkit-scrollbar { width: 4px; }
+#chat::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+.empty-state {
+  flex: 1; display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 10px; color: var(--muted); text-align: center; padding: 48px;
+  animation: fadeIn 0.3s ease;
+}
+.empty-icon { font-size: 36px; opacity: 0.45; }
+.empty-text { font-size: 13px; line-height: 1.7; }
+
+/* Messages */
+.msg { display: flex; flex-direction: column; gap: 4px; max-width: 82%; animation: slideUp 0.2s ease; }
+.msg.user  { align-self: flex-end;   align-items: flex-end; }
+.msg.agent { align-self: flex-start; align-items: flex-start; }
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+.msg-label {
+  font-size: 10px; font-weight: 500;
+  letter-spacing: 0.8px; text-transform: uppercase; padding: 0 2px;
+}
+.msg.user  .msg-label { color: var(--accent); }
+.msg.agent .msg-label { color: var(--text-2); }
+
+.msg-bubble {
+  padding: 11px 15px; font-size: 13.5px; line-height: 1.65;
+  border: 1px solid transparent; border-radius: 12px;
+}
+.msg.user  .msg-bubble { background: var(--user-bg);  border-color: var(--user-border);  border-bottom-right-radius: 3px; }
+.msg.agent .msg-bubble { background: var(--agent-bg); border-color: var(--agent-border); border-bottom-left-radius: 3px; }
+
+.msg-tags { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 2px; }
+.tag {
+  font-size: 10px; font-weight: 500;
+  background: var(--surface2); border: 1px solid var(--border);
+  color: var(--muted); padding: 2px 7px; border-radius: 4px;
+}
+.tag.intent { color: var(--accent); border-color: var(--user-border); background: var(--user-bg); }
+
+/* Typing */
+.typing .msg-bubble { display: flex; gap: 5px; align-items: center; padding: 14px 16px; }
+.typing-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--border); animation: tbounce 1.2s ease-in-out infinite;
+}
+.typing-dot:nth-child(2) { animation-delay: 0.15s; }
+.typing-dot:nth-child(3) { animation-delay: 0.30s; }
+@keyframes tbounce {
+  0%,60%,100% { transform: translateY(0);   background: var(--border); }
+  30%          { transform: translateY(-6px); background: var(--accent); }
+}
+
+/* Controls */
+#controls {
+  width: 100%; max-width: 680px;
+  padding: 12px 24px 24px; flex-shrink: 0;
+  border-top: 1px solid var(--border); background: var(--bg);
+}
+#waveform {
+  height: 28px; display: flex; align-items: center; justify-content: center;
+  gap: 2px; margin-bottom: 10px; opacity: 0; transition: opacity 0.3s;
+}
+#waveform.active { opacity: 1; }
+.wbar { width: 3px; border-radius: 2px; background: var(--accent); height: 3px; transition: height 0.08s; }
+
+#mic-btn {
+  width: 100%; height: 54px;
+  background: var(--accent); color: #fff; border: none; border-radius: 12px;
+  font-family: 'Syne', sans-serif; font-weight: 700; font-size: 13px;
+  letter-spacing: 0.8px; text-transform: uppercase; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  transition: background 0.15s, transform 0.1s, box-shadow 0.15s;
+  box-shadow: 0 2px 8px rgba(204,0,0,0.3);
+  user-select: none; -webkit-user-select: none;
+}
+#mic-btn:hover:not(:disabled)  { background: #aa0000; box-shadow: 0 4px 16px rgba(204,0,0,0.4); }
+#mic-btn.recording              { background: #990000; transform: scale(0.985); }
+#mic-btn:disabled               { background: var(--surface2); color: var(--muted); box-shadow: none; cursor: not-allowed; }
+.mic-icon { font-size: 19px; }
+
+.hint       { margin-top: 8px; font-size: 11px; color: var(--muted); text-align: center; }
+.session-id { margin-top: 3px; font-size: 10px; color: var(--border); text-align: center; font-family: monospace; }
+
+/* Toast */
+#toast {
+  position: fixed; bottom: 100px; left: 50%;
+  transform: translateX(-50%) translateY(8px);
+  background: #111; color: #fff; font-size: 12px;
+  padding: 9px 18px; border-radius: 8px;
+  opacity: 0; pointer-events: none;
+  transition: opacity 0.25s, transform 0.25s;
+  z-index: 99; max-width: 340px; text-align: center;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+}
+#toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-inner">
+    <div class="brand">Nim<span>son</span></div>
+    <div class="header-right">
+      <div class="status-pill">
+        <div class="dot" id="status-dot"></div>
+        <span id="status-text">Connecting...</span>
+      </div>
+      <button id="reset-btn" title="Reset session">↺</button>
+    </div>
+  </div>
+</header>
+
+<div id="chat">
+  <div class="empty-state" id="empty-state">
+    <div class="empty-icon">🎙️</div>
+    <div class="empty-text">Hold the button and start speaking.<br/>Nimson ka agent sun raha hai.</div>
+  </div>
+</div>
+
+<div id="controls">
+  <div id="waveform"></div>
+  <button id="mic-btn" disabled>
+    <span class="mic-icon">🎤</span>
+    <span id="btn-label">Hold to Speak</span>
+  </button>
+  <div class="hint" id="hint">Hold mic to record · Release to send</div>
+  <div class="session-id" id="session-id"></div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+// Config — auto-uses same host this page is served from
+const API = window.location.origin;
+
+// State
+let sessionId    = genId();
+let isRecording  = false;
+let isProcessing = false;
+let mediaRec     = null;
+let chunks       = [];
+let micStream    = null;
+let audioCtx     = null;
+let analyser     = null;
+let waveTimer    = null;
+let toastTimer   = null;
+
+// DOM refs
+const $chat    = document.getElementById('chat');
+const $micBtn  = document.getElementById('mic-btn');
+const $label   = document.getElementById('btn-label');
+const $dot     = document.getElementById('status-dot');
+const $status  = document.getElementById('status-text');
+const $hint    = document.getElementById('hint');
+const $sid     = document.getElementById('session-id');
+const $wave    = document.getElementById('waveform');
+const $toast   = document.getElementById('toast');
+
+// Build waveform bars
+for (let i = 0; i < 32; i++) {
+  const b = document.createElement('div');
+  b.className = 'wbar';
+  $wave.appendChild(b);
+}
+const bars = [...$wave.querySelectorAll('.wbar')];
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+function genId() { return 'web-' + Math.random().toString(36).slice(2, 10); }
+
+function init() {
+  $sid.textContent = sessionId;
+  ping();
+}
+
+async function ping() {
+  try {
+    const r = await fetch(`${API}/health`, { signal: AbortSignal.timeout(5000) });
+    const d = await r.json();
+    if (d.status === 'ok' && d.agent) {
+      setStatus('online', 'Agent ready');
+      $micBtn.disabled = false;
+    } else {
+      setStatus('', 'Agent loading...');
+      setTimeout(ping, 3000);
+    }
+  } catch {
+    setStatus('', 'Reconnecting...');
+    toast('Cannot reach server · retrying...');
+    setTimeout(ping, 5000);
+  }
+}
+
+// ── Status ────────────────────────────────────────────────────────────────────
+function setStatus(cls, text) {
+  $dot.className = 'dot' + (cls ? ' ' + cls : '');
+  $status.textContent = text;
+}
+
+// ── Mic press handlers ────────────────────────────────────────────────────────
+$micBtn.addEventListener('mousedown',  startRec);
+$micBtn.addEventListener('touchstart', e => { e.preventDefault(); startRec(); }, { passive: false });
+$micBtn.addEventListener('mouseup',    stopRec);
+$micBtn.addEventListener('mouseleave', () => { if (isRecording) stopRec(); });
+$micBtn.addEventListener('touchend',   stopRec);
+
+async function startRec() {
+  if (isProcessing || isRecording) return;
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: true }
+    });
+  } catch {
+    toast('Microphone access denied · check browser permissions');
+    return;
+  }
+
+  audioCtx = new AudioContext();
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 64;
+  audioCtx.createMediaStreamSource(micStream).connect(analyser);
+  $wave.classList.add('active');
+  waveTimer = setInterval(drawWave, 60);
+
+  chunks   = [];
+  mediaRec = new MediaRecorder(micStream);
+  mediaRec.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+  mediaRec.start(100);
+
+  isRecording = true;
+  $micBtn.classList.add('recording');
+  $label.textContent = 'Release to Send';
+  setStatus('recording', 'Listening...');
+  $hint.textContent = 'Release to send · keep talking';
+}
+
+async function stopRec() {
+  if (!isRecording) return;
+  isRecording  = false;
+  isProcessing = true;
+
+  clearInterval(waveTimer);
+  $wave.classList.remove('active');
+  bars.forEach(b => b.style.height = '3px');
+
+  mediaRec.stop();
+  micStream.getTracks().forEach(t => t.stop());
+  if (audioCtx) { audioCtx.close(); audioCtx = null; }
+
+  $micBtn.classList.remove('recording');
+  $micBtn.disabled = true;
+  $label.textContent = 'Processing...';
+  setStatus('online', 'Processing...');
+
+  await new Promise(r => setTimeout(r, 150));
+
+  const blob = new Blob(chunks, { type: 'audio/webm' });
+  if (blob.size < 800) {
+    toast('No audio captured · speak closer to mic');
+    resetCtrl();
+    return;
+  }
+  await runTurn(await toWav(blob));
+}
+
+function drawWave() {
+  if (!analyser) return;
+  const d = new Uint8Array(analyser.frequencyBinCount);
+  analyser.getByteFrequencyData(d);
+  bars.forEach((b, i) => { b.style.height = Math.max(3, ((d[i] ?? 0) / 255) * 24) + 'px'; });
+}
+
+// ── WAV conversion ────────────────────────────────────────────────────────────
+async function toWav(blob) {
+  try {
+    const ctx   = new AudioContext({ sampleRate: 16000 });
+    const audio = await ctx.decodeAudioData(await blob.arrayBuffer());
+    ctx.close();
+    const pcm = audio.getChannelData(0);
+    const i16 = new Int16Array(pcm.length);
+    for (let i = 0; i < pcm.length; i++) i16[i] = Math.max(-32768, Math.min(32767, pcm[i] * 32767 | 0));
+    return pcmToWav(i16, 16000);
+  } catch { return blob; }
+}
+
+function pcmToWav(i16, sr) {
+  const ab = new ArrayBuffer(44 + i16.length * 2);
+  const dv = new DataView(ab);
+  const s  = (o, str) => [...str].forEach((c, i) => dv.setUint8(o + i, c.charCodeAt(0)));
+  s(0,'RIFF'); dv.setUint32(4, 36 + i16.length * 2, true);
+  s(8,'WAVE'); s(12,'fmt '); dv.setUint32(16, 16, true);
+  dv.setUint16(20,1,true); dv.setUint16(22,1,true);
+  dv.setUint32(24,sr,true); dv.setUint32(28,sr*2,true);
+  dv.setUint16(32,2,true); dv.setUint16(34,16,true);
+  s(36,'data'); dv.setUint32(40, i16.length * 2, true);
+  i16.forEach((v, i) => dv.setInt16(44 + i * 2, v, true));
+  return new Blob([ab], { type: 'audio/wav' });
+}
+
+// ── Turn pipeline ─────────────────────────────────────────────────────────────
+async function runTurn(wavBlob) {
+  try {
+    // 1. Transcribe
+    $hint.textContent = 'Transcribing...';
+    const tRes = await fetch(`${API}/test/transcribe`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: await wavBlob.arrayBuffer(),
+    });
+    if (!tRes.ok) throw new Error(`Transcribe failed (${tRes.status})`);
+    const { text } = await tRes.json();
+
+    if (!text?.trim()) {
+      toast('Could not understand · please speak clearly');
+      resetCtrl();
+      return;
+    }
+    addMsg('user', text.trim());
+
+    // 2. Agent
+    $hint.textContent = 'Thinking...';
+    addTyping();
+    const aRes = await fetch(`${API}/test/full`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: text.trim(), session_id: sessionId }),
+    });
+    if (!aRes.ok) throw new Error(`Agent failed (${aRes.status})`);
+    const d = await aRes.json();
+    removeTyping();
+
+    const response = d.response || '';
+    const followup = d.followup || '';
+    const full     = response + (followup ? ' ' + followup : '');
+
+    addMsg('agent', full, { intent: d.intent, product: d.entities?.product_name, turn: d.turn });
+
+    // 3. Speak
+    $hint.textContent = 'Speaking...';
+    const sRes = await fetch(`${API}/test/synthesize`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: full }),
+    });
+    if (sRes.ok) {
+      const url = URL.createObjectURL(await sRes.blob());
+      const aud = new Audio(url);
+      aud.onended = () => { URL.revokeObjectURL(url); resetCtrl(); };
+      aud.onerror = resetCtrl;
+      await aud.play().catch(resetCtrl);
+    } else {
+      resetCtrl();
+    }
+
+    if (d.intent === 'end_call') {
+      $micBtn.disabled = true;
+      $hint.textContent = 'Session ended · press ↺ to restart';
+    }
+  } catch (err) {
+    removeTyping();
+    toast('Error: ' + err.message);
+    resetCtrl();
+  }
+}
+
+// ── Chat helpers ──────────────────────────────────────────────────────────────
+function mk(tag, cls, text, id) {
+  const e = document.createElement(tag);
+  if (cls)  e.className   = cls;
+  if (text) e.textContent = text;
+  if (id)   e.id          = id;
+  return e;
+}
+
+function addMsg(role, text, meta = {}) {
+  document.getElementById('empty-state')?.remove();
+  const wrap   = mk('div', `msg ${role}`);
+  const label  = mk('div', 'msg-label', role === 'user' ? 'You' : 'Nimson');
+  const bubble = mk('div', 'msg-bubble', text);
+  wrap.append(label, bubble);
+
+  if (role === 'agent' && (meta.intent || meta.product || meta.turn)) {
+    const tags = mk('div', 'msg-tags');
+    if (meta.turn)    tags.append(mk('span', 'tag', `#${meta.turn}`));
+    if (meta.intent)  tags.append(mk('span', 'tag intent', meta.intent));
+    if (meta.product) tags.append(mk('span', 'tag', meta.product));
+    wrap.append(tags);
+  }
+  $chat.append(wrap);
+  $chat.scrollTop = $chat.scrollHeight;
+}
+
+function addTyping() {
+  const wrap   = mk('div', 'msg agent typing', '', 'typing-ind');
+  const label  = mk('div', 'msg-label', 'Nimson');
+  const bubble = mk('div', 'msg-bubble');
+  [0,1,2].forEach(() => bubble.append(mk('div', 'typing-dot')));
+  wrap.append(label, bubble);
+  $chat.append(wrap);
+  $chat.scrollTop = $chat.scrollHeight;
+}
+function removeTyping() { document.getElementById('typing-ind')?.remove(); }
+
+// ── Reset ─────────────────────────────────────────────────────────────────────
+function resetCtrl() {
+  isProcessing = false;
+  $micBtn.disabled = false;
+  $micBtn.classList.remove('recording');
+  $label.textContent = 'Hold to Speak';
+  setStatus('online', 'Agent ready');
+  $hint.textContent = 'Hold mic to record · Release to send';
+}
+
+document.getElementById('reset-btn').addEventListener('click', async () => {
+  try {
+    await fetch(`${API}/test/reset`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId }),
+    });
+  } catch {}
+  sessionId = genId();
+  $sid.textContent = sessionId;
+  $chat.innerHTML = `<div class="empty-state">
+    <div class="empty-icon">🎙️</div>
+    <div class="empty-text">Session reset · start a new conversation.</div>
+  </div>`;
+  resetCtrl();
+});
+
+// ── Toast ─────────────────────────────────────────────────────────────────────
+function toast(msg) {
+  $toast.textContent = msg;
+  $toast.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => $toast.classList.remove('show'), 4000);
+}
+
+init();
+</script>
+</body>
+</html>

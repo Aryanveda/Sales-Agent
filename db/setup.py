@@ -86,6 +86,16 @@ def run_call_schema():
     conn.close()
 
 
+def run_inventory_schema():
+    inventory_path = os.path.join(HERE, "inventory.sql")
+    with open(inventory_path, encoding="utf-8") as f:
+        sql = f.read()
+    conn = get_conn(DB_PATH)
+    conn.executescript(sql)
+    conn.commit()
+    conn.close()
+
+
 def verify_calls():
     conn = get_conn(CALLS_DB_PATH)
     tables = [
@@ -117,6 +127,9 @@ if __name__ == "__main__":
     print(f"\n[2/2] Calls DB     →  {CALLS_DB_PATH}\n")
     run("Creating call schema",  run_call_schema)
     run("Verifying tables",      verify_calls)
+
+    print(f"\n[3/3] Inventory    →  {DB_PATH}\n")
+    run("Creating inventory",    run_inventory_schema)
 
     print("\nAll databases ready!")
     print("119 products loaded into aryanveda.db")

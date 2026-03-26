@@ -21,6 +21,7 @@ _client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 HISTORY_WINDOW = 20
 
+
 def _extract_json(text: str) -> dict:
     clean = text.strip()
     if clean.startswith("```"):
@@ -42,6 +43,7 @@ def _extract_text(response) -> str:
             if hasattr(part, "text") and part.text:
                 raw += part.text
     return raw
+
 
 class IntentClassifier:
     def __init__(self, model: str = "gemini-2.5-flash"):
