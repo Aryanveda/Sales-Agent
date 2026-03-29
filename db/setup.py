@@ -5,15 +5,11 @@ from dotenv import load_dotenv
 
 load_dotenv(override=False)
 
-DB_PATH      = os.getenv("DB_PATH",      "aryanveda.db")
+DB_PATH       = os.getenv("DB_PATH",       "db/aryanveda.db")
 CALLS_DB_PATH = os.getenv("CALLS_DB_PATH", os.path.join(os.path.dirname(DB_PATH), "call.db"))
 
 HERE = os.path.dirname(__file__)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────────────────────────
 
 def run(label, fn):
     print(f"  -> {label}...", end=" ", flush=True)
@@ -33,13 +29,8 @@ def get_conn(path):
     return conn
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# aryanveda.db  (products)
-# ─────────────────────────────────────────────────────────────────────────────
-
 def run_schema():
-    schema_path = os.path.join(HERE, "schema.sql")
-    with open(schema_path, encoding="utf-8") as f:
+    with open(os.path.join(HERE, "schema.sql"), encoding="utf-8") as f:
         sql = f.read()
     conn = get_conn(DB_PATH)
     conn.executescript(sql)
@@ -48,90 +39,99 @@ def run_schema():
 
 
 def run_seed():
-    seed_path = os.path.join(HERE, "seed.sql")
-    with open(seed_path, encoding="utf-8") as f:
+    with open(os.path.join(HERE, "seed.sql"), encoding="utf-8") as f:
         sql = f.read()
     conn = get_conn(DB_PATH)
-    conn.executescript(sql)
-    conn.commit()
-    conn.close()
-
-
-def verify_products():
-    conn = get_conn(DB_PATH)
-    product_count = conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
-    sample = conn.execute(
-        "SELECT id, product_name, mrp_unit, retail FROM products LIMIT 1"
-    ).fetchone()
-    conn.close()
-
-    print(f"\n  Total Products : {product_count}")
-    if sample:
-        print(f"  Sample         : {sample['product_name']}")
-        print(f"  MRP: {sample['mrp_unit']} | Retail: {sample['retail']}")
-    print(f"  Database       : {os.path.abspath(DB_PATH)}")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# call.db  (caller sessions & transcripts)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def run_call_schema():
-    call_schema_path = os.path.join(HERE, "call.sql")
-    with open(call_schema_path, encoding="utf-8") as f:
-        sql = f.read()
-    conn = get_conn(CALLS_DB_PATH)
     conn.executescript(sql)
     conn.commit()
     conn.close()
 
 
 def run_inventory_schema():
-    inventory_path = os.path.join(HERE, "inventory.sql")
-    with open(inventory_path, encoding="utf-8") as f:
+    path = os.path.join(HERE, "inventory.sql")
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            sql = f.read()
+        conn = get_conn(DB_PATH)
+        conn.executescript(sql)
+        conn.commit()
+        conn.close()
+
+
+def verify_products():
+    conn  = get_conn(DB_PATH)
+    count = conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
+    sample = conn.execute("SELECT product_name, mrp_unit, retail FROM products LIMIT 1").fetchone()
+    conn.close()
+    print(f"\n  Total Products : {count}")
+    if sample:
+        print(f"  Sample         : {sample['product_name']} | MRP {sample['mrp_unit']} | Retail {sample['retail']}")
+    print(f"  Database       : {os.path.abspath(DB_PATH)}")
+
+
+def run_call_schema():
+    with open(os.path.join(HERE, "call.sql"), encoding="utf-8") as f:
         sql = f.read()
-    conn = get_conn(DB_PATH)
+    conn = get_conn(CALLS_DB_PATH)
     conn.executescript(sql)
     conn.commit()
     conn.close()
 
 
-def verify_calls():
+def run_call_patch():
+    """Apply call_patch.sql — adds customer_type, caller_summary, orders tables."""
+    patch_path = os.path.join(HERE, "call_patch.sql")
+    if not os.path.exists(patch_path):
+        print("  (call_patch.sql not found — skipping)")
+        return
+    with open(patch_path, encoding="utf-8") as f:
+        statements = [s.strip() for s in f.read().split(";")
+                      if s.strip() and not s.strip().startswith("--")]
     conn = get_conn(CALLS_DB_PATH)
-    tables = [
-        r[0] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-        ).fetchall()
-    ]
+    for stmt in statements:
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                print(f"\n  WARN: {e}")
+    conn.commit()
     conn.close()
 
-    print(f"\n  Tables created : {', '.join(tables)}")
-    print(f"  Database       : {os.path.abspath(CALLS_DB_PATH)}")
+
+def verify_calls():
+    conn   = get_conn(CALLS_DB_PATH)
+    tables = [r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+    ).fetchall()]
+    conn.close()
+    print(f"\n  Tables : {', '.join(tables)}")
+    print(f"  DB     : {os.path.abspath(CALLS_DB_PATH)}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Entry point
-# ─────────────────────────────────────────────────────────────────────────────
+def create_export_dirs():
+    for d in ["exports/orders", "exports/transcripts"]:
+        os.makedirs(d, exist_ok=True)
+        print(f"  Created: {d}")
+
 
 if __name__ == "__main__":
     print("\nAryanVeda Database Setup")
-    print("=" * 50)
+    print("=" * 55)
 
-    # ── Products DB ──────────────────────────────────────────────────────────
-    print(f"\n[1/2] Products DB  →  {DB_PATH}\n")
+    print(f"\n[1/4] Products DB  →  {DB_PATH}\n")
     run("Creating schema",       run_schema)
-    run("Loading 119 products",  run_seed)
+    run("Loading products",      run_seed)
+    run("Adding inventory",      run_inventory_schema)
     run("Verifying data",        verify_products)
 
-    # ── Calls DB ─────────────────────────────────────────────────────────────
-    print(f"\n[2/2] Calls DB     →  {CALLS_DB_PATH}\n")
+    print(f"\n[2/4] Calls DB     →  {CALLS_DB_PATH}\n")
     run("Creating call schema",  run_call_schema)
+    run("Applying patch",        run_call_patch)
     run("Verifying tables",      verify_calls)
 
-    print(f"\n[3/3] Inventory    →  {DB_PATH}\n")
-    run("Creating inventory",    run_inventory_schema)
+    print(f"\n[3/4] Export dirs\n")
+    create_export_dirs()
 
-    print("\nAll databases ready!")
-    print("119 products loaded into aryanveda.db")
-    print("call.db initialised with 6 tables (callers, sessions, transcripts,")
-    print("       session_context, caller_memory, call_events)\n")
+    print(f"\n[4/4] Done!\n")
+    print("All databases ready. Run the agent with:")
+    print("  uvicorn server:app --host 0.0.0.0 --port 8000\n")

@@ -118,3 +118,55 @@ class IntentClassifier:
             "entities":   {"product_name": None, "weight_hint": None, "quantity": None, "order_ref": None},
             "language":   "hinglish",
         }
+
+# ── Response cache ────────────────────────────────────────────────────────────
+# Required by agent/skynet.py — caches get_price/check_stock responses for 90s
+# so repeated queries for the same product skip the full LLM call (~300ms saved)
+
+import hashlib
+from typing import Optional, Dict
+
+
+class ResponseCache:
+    def __init__(self, ttl: int = 90, max_size: int = 200):
+        self._cache: Dict[str, dict] = {}
+        self._times: Dict[str, float] = {}
+        self.ttl      = ttl
+        self.max_size = max_size
+
+    def _key(self, intent: str, product_id: Optional[str],
+             weight: Optional[str], customer_type: Optional[str]) -> str:
+        raw = f"{intent}|{product_id or ''}|{weight or ''}|{customer_type or ''}"
+        return hashlib.md5(raw.encode()).hexdigest()
+
+    def get(self, intent: str, product_id: Optional[str],
+            weight: Optional[str], customer_type: Optional[str]) -> Optional[dict]:
+        if intent not in ("get_price", "check_stock") or not product_id:
+            return None
+        k = self._key(intent, product_id, weight, customer_type)
+        if k in self._cache:
+            if time.time() - self._times[k] < self.ttl:
+                logger.info(f"[Cache] HIT intent={intent} product={product_id}")
+                return self._cache[k]
+            del self._cache[k]
+            del self._times[k]
+        return None
+
+    def set(self, intent: str, product_id: Optional[str],
+            weight: Optional[str], customer_type: Optional[str], response: dict):
+        if intent not in ("get_price", "check_stock") or not product_id:
+            return
+        if len(self._cache) >= self.max_size:
+            oldest = min(self._times, key=self._times.get)
+            del self._cache[oldest]
+            del self._times[oldest]
+        k = self._key(intent, product_id, weight, customer_type)
+        self._cache[k] = response
+        self._times[k] = time.time()
+
+
+_response_cache = ResponseCache()
+
+
+def get_response_cache() -> ResponseCache:
+    return _response_cache

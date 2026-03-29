@@ -1,17 +1,15 @@
 import io
 import os
+import re
 import logging
 import subprocess
 import tempfile
-from elevenlabs.client import ElevenLabs
-from elevenlabs import VoiceSettings
-
 
 logger = logging.getLogger(__name__)
 
 TTS_ENGINE       = os.getenv("TTS_ENGINE", "auto")
 ELEVENLABS_KEY   = os.getenv("ELEVENLABS_API_KEY", "")
-ELEVENLABS_VOICE = os.getenv("ELEVENLABS_VOICE_ID", "")   # voice ID from ElevenLabs dashboard
+ELEVENLABS_VOICE = os.getenv("ELEVENLABS_VOICE_ID", "")
 
 VOICE_SAMPLE = os.path.join(
     os.path.dirname(__file__), "..", "data", "recordings", "Tanmay.mp4"
@@ -19,6 +17,23 @@ VOICE_SAMPLE = os.path.join(
 VOICE_WAV = os.path.join(
     os.path.dirname(__file__), "..", "data", "recordings", "Tanmay.wav"
 )
+
+
+# ── Text cleanup before TTS ───────────────────────────────────────────────────
+# ElevenLabs turbo does not expand abbreviations or mixed units naturally.
+# This pass normalises the most common patterns that appear in agent responses.
+
+_UNIT_RE = re.compile(r"(\d+)\s*(ml|gm|g|kg|l|mg)\b", re.IGNORECASE)
+_SYMBOL_RE = re.compile(r"[₹$€£]")
+
+def _clean_for_tts(text: str) -> str:
+    # Remove any rupee symbols that slipped through (agent should say "rupaye")
+    text = _SYMBOL_RE.sub("", text)
+    # "180ml" → "180 ml", "100gm" → "100 gm" — prevents ElevenLabs reading as one word
+    text = _UNIT_RE.sub(r"\1 \2", text)
+    # Collapse multiple spaces
+    text = re.sub(r" {2,}", " ", text)
+    return text.strip()
 
 
 # ── Audio conversion helpers ──────────────────────────────────────────────────
@@ -38,6 +53,8 @@ def _mp4_to_wav(mp4_path: str, wav_path: str) -> bool:
 
 
 def _to_pcm(input_path: str) -> bytes:
+    """Convert any audio file to PCM WAV 8kHz mono (Exotel-compatible)."""
+    out_path = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             out_path = f.name
@@ -47,15 +64,21 @@ def _to_pcm(input_path: str) -> bytes:
             check=True, capture_output=True,
         )
         with open(out_path, "rb") as f:
-            data = f.read()
-        os.remove(out_path)
-        return data
+            return f.read()
     except Exception as e:
         logger.error(f"[TTS] PCM conversion failed: {e}")
         return b""
+    finally:
+        # FIX: always clean up temp file even on ffmpeg failure
+        if out_path:
+            try:
+                os.remove(out_path)
+            except Exception:
+                pass
 
 
 def _mp3_to_pcm(mp3_bytes: bytes) -> bytes:
+    """Pipe MP3 bytes through ffmpeg → PCM WAV 8kHz mono."""
     try:
         proc = subprocess.run(
             ["ffmpeg", "-y", "-f", "mp3", "-i", "pipe:0",
@@ -72,25 +95,39 @@ def _mp3_to_pcm(mp3_bytes: bytes) -> bytes:
 # ── ElevenLabs ────────────────────────────────────────────────────────────────
 
 def _speak_elevenlabs(text: str) -> bytes:
+    """
+    Call ElevenLabs and return PCM WAV bytes (8kHz mono) ready for Exotel.
+    FIX 1: converts MP3 output to PCM before returning.
+    FIX 2: uses eleven_turbo_v2_5 (low-latency) not eleven_multilingual_v2.
+    FIX 3: voice settings tuned for consistent Hinglish sales voice.
+    """
     try:
-        client = ElevenLabs(api_key=ELEVENLABS_KEY)
+        from elevenlabs.client import ElevenLabs
+        from elevenlabs import VoiceSettings
 
-        audio = client.text_to_speech.convert(
-            voice_id              = ELEVENLABS_VOICE,
-            text                  = text,
-            model_id              = "eleven_multilingual_v2",
-            voice_settings        = VoiceSettings(
-                stability         = 0.4,   # lower = more expressive
-                similarity_boost  = 0.75,
-                style             = 0.3,   # adds natural variation
+        client = ElevenLabs(api_key=ELEVENLABS_KEY)
+        audio  = client.text_to_speech.convert(
+            voice_id       = ELEVENLABS_VOICE,
+            text           = text,
+            # FIX 2: eleven_turbo_v2_5 = ~280ms latency vs ~600ms for multilingual_v2
+            model_id       = "eleven_turbo_v2_5",
+            voice_settings = VoiceSettings(
+                # FIX 3: tuned for a consistent, professional Hinglish sales voice
+                stability        = 0.5,   # was 0.4 — too low makes voice wander turn-to-turn
+                similarity_boost = 0.9,   # was 0.75 — higher = stays on-character
+                style            = 0.35,  # slight expressiveness, not robotic
                 use_speaker_boost = True,
             ),
-            output_format         = "mp3_44100_128",
+            output_format  = "mp3_44100_128",
         )
-        # audio is a generator — consume it
         mp3_bytes = b"".join(audio)
-        logger.info(f"[TTS] ElevenLabs → {len(mp3_bytes)} bytes")
-        return mp3_bytes
+        logger.info(f"[TTS] ElevenLabs MP3 → {len(mp3_bytes)} bytes, converting to PCM...")
+
+        # FIX 1: convert to PCM 8kHz before returning — gTTS does this, ElevenLabs must too
+        pcm = _mp3_to_pcm(mp3_bytes)
+        if pcm:
+            logger.info(f"[TTS] ElevenLabs PCM → {len(pcm)} bytes")
+        return pcm
 
     except Exception as e:
         logger.error(f"[TTS] ElevenLabs failed: {e}")
@@ -117,19 +154,21 @@ class Synthesizer:
         if requested in ("elevenlabs", "auto"):
             if ELEVENLABS_KEY and ELEVENLABS_VOICE:
                 try:
-                    # Quick connectivity test
-                    ElevenLabs(api_key=ELEVENLABS_KEY)
+                    from elevenlabs.client import ElevenLabs
+                    client = ElevenLabs(api_key=ELEVENLABS_KEY)
+                    # FIX 4: actually validate the key — list voices makes a real API call
+                    client.voices.get_all()
                     self.engine = "elevenlabs"
-                    logger.info("[TTS] Engine: ElevenLabs")
+                    logger.info("[TTS] Engine: ElevenLabs (key validated)")
                     return
                 except ImportError:
                     logger.warning("[TTS] elevenlabs package not installed → pip install elevenlabs")
                 except Exception as e:
-                    logger.warning(f"[TTS] ElevenLabs init failed: {e}")
+                    logger.warning(f"[TTS] ElevenLabs key validation failed: {e} → trying next engine")
             elif requested == "elevenlabs":
                 logger.error("[TTS] ELEVENLABS_API_KEY or ELEVENLABS_VOICE_ID missing in .env")
 
-        # Coqui
+        # Coqui XTTS-v2
         if requested in ("coqui", "auto"):
             try:
                 from TTS.api import TTS
@@ -144,26 +183,35 @@ class Synthesizer:
                     logger.warning(f"[TTS] Coqui not available → gTTS fallback")
 
         self.engine = "gtts"
-        logger.info("[TTS] Engine: gTTS (free fallback — consider ElevenLabs for better quality)")
+        logger.info("[TTS] Engine: gTTS (fallback — set TTS_ENGINE=elevenlabs for production)")
 
     def speak(self, text: str) -> bytes:
+        """
+        Returns PCM WAV bytes at 8kHz mono for all engines.
+        All paths produce the same format — Exotel-compatible.
+        """
         if not text or not text.strip():
             return b""
+
+        # FIX 5: clean text before any TTS call (expand units, strip stray symbols)
+        cleaned = _clean_for_tts(text)
+
         try:
             if self.engine == "elevenlabs":
-                mp3 = _speak_elevenlabs(text)
-                return mp3 if mp3 else self._speak_gtts(text)
+                pcm = _speak_elevenlabs(cleaned)
+                return pcm if pcm else self._speak_gtts(cleaned)
             if self.engine == "coqui":
-                return self._speak_coqui(text)
-            return self._speak_gtts(text)
+                return self._speak_coqui(cleaned)
+            return self._speak_gtts(cleaned)
         except Exception as e:
-            logger.error(f"[TTS] speak failed: {e} → gTTS fallback")
-            return self._speak_gtts(text)
+            logger.error(f"[TTS] speak() failed: {e} → gTTS fallback")
+            return self._speak_gtts(cleaned)
 
     def _speak_coqui(self, text: str) -> bytes:
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            raw_path = f.name
+        raw_path = None
         try:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                raw_path = f.name
             self.tts_model.tts_to_file(
                 text        = text,
                 speaker_wav = self.voice_wav if os.path.exists(self.voice_wav) else None,
@@ -177,18 +225,18 @@ class Synthesizer:
             logger.error(f"[TTS] Coqui generation failed: {e}")
             return b""
         finally:
-            try:
-                os.remove(raw_path)
-            except Exception:
-                pass
+            if raw_path:
+                try:
+                    os.remove(raw_path)
+                except Exception:
+                    pass
 
     def _speak_gtts(self, text: str) -> bytes:
         try:
             from gtts import gTTS
             buf = io.BytesIO()
             gTTS(text=text, lang="hi", tld="co.in", slow=False).write_to_fp(buf)
-            mp3_bytes = buf.getvalue()
-            audio = _mp3_to_pcm(mp3_bytes)
+            audio = _mp3_to_pcm(buf.getvalue())
             logger.info(f"[TTS] gTTS → {len(audio)} bytes PCM")
             return audio
         except Exception as e:
@@ -197,6 +245,7 @@ class Synthesizer:
 
 
 # ── TTSPipeline ───────────────────────────────────────────────────────────────
+
 class TTSPipeline:
     def __init__(self):
         self.synthesizer = Synthesizer()

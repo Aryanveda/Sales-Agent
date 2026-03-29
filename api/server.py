@@ -1,3 +1,11 @@
+"""
+server.py — updated
+Key changes over original:
+  - WebSocket finally block calls _agent.on_call_end(session) for transcript + order pipeline
+  - GET /exports/orders — list today's orders as JSON
+  - GET /exports/transcript/{session_uuid} — download transcript file
+"""
+
 import logging
 import uuid
 import os
@@ -14,9 +22,9 @@ from db.session_manager import SessionManager
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-app      = FastAPI(title="AryanVeda Voice Agent")
-_agent   = None
-_sm      = None
+app       = FastAPI(title="AryanVeda Voice Agent")
+_agent    = None
+_sm       = None
 _sessions = {}
 
 SERVER_URL       = os.getenv("SERVER_URL", "http://localhost:8000")
@@ -49,16 +57,16 @@ async def serve_ui():
     return FileResponse(ui_path, media_type="text/html")
 
 
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Exotel webhooks
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
 @app.post("/exotel/incoming")
 async def exotel_incoming(request: Request):
-    form     = await request.form()
-    call_sid = form.get("CallSid", str(uuid.uuid4()))
-    caller   = form.get("From", "unknown")
-    context  = request.query_params.get("context", "")   # set by outbound_caller.py
+    form      = await request.form()
+    call_sid  = form.get("CallSid", str(uuid.uuid4()))
+    caller    = form.get("From", "unknown")
+    context   = request.query_params.get("context", "")
     direction = "outbound" if context else "inbound"
 
     logger.info(f"{direction.title()} call | SID={call_sid} | From={caller} | context='{context}'")
@@ -76,7 +84,6 @@ async def exotel_incoming(request: Request):
 
     base_url = SERVER_URL.replace("http://", "ws://").replace("https://", "wss://")
 
-    # Outbound greeting references context if set (e.g. "Follow up on last order")
     if context:
         greeting = f"Namaste! Main Skynet hoon, AryanVeda ka sales assistant. {context} ke baare mein baat karni thi."
     else:
@@ -106,10 +113,9 @@ async def exotel_status(request: Request):
     return Response(content="OK")
 
 
-# -----------------------------------------------------------------------------
-# Outbound REST trigger  — POST /call/outbound  {"to": "+91XXXXXXXXXX", "context": "..."}
-# Lets you initiate a call directly from API without running outbound_caller.py
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Outbound call trigger
+# ---------------------------------------------------------------------------
 
 @app.post("/call/outbound")
 async def call_outbound(request: Request):
@@ -152,7 +158,7 @@ async def call_outbound(request: Request):
         resp = http_requests.post(api_url, data=payload, timeout=15)
         resp.raise_for_status()
         call_data = resp.json().get("Call", {})
-        logger.info(f"[Outbound] Dialled {to} | SID={call_data.get('Sid')} | Status={call_data.get('Status')}")
+        logger.info(f"[Outbound] Dialled {to} | SID={call_data.get('Sid')}")
         return {
             "success":  True,
             "to":       to,
@@ -164,18 +170,18 @@ async def call_outbound(request: Request):
         return JSONResponse({"success": False, "error": str(e)}, status_code=500)
 
 
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # WebSocket — live audio stream
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
 @app.websocket("/call/{call_sid}")
 async def call_handler(websocket: WebSocket, call_sid: str):
     await websocket.accept()
     logger.info(f"WS connected | call_sid={call_sid}")
 
-    meta      = _sessions.get(call_sid, {})
-    db_sid    = meta.get("db_session_id")
-    phone     = meta.get("phone", "unknown")
+    meta   = _sessions.get(call_sid, {})
+    db_sid = meta.get("db_session_id")
+    phone  = meta.get("phone", "unknown")
 
     agent_session = _agent.new_session(
         session_id      = call_sid,
@@ -217,11 +223,55 @@ async def call_handler(websocket: WebSocket, call_sid: str):
         logger.info(f"Call ended | call_sid={call_sid} | turns={agent_session['turn']}")
         if db_sid:
             _sm.flush_memory(db_sid, agent_session["memory"])
+            # --- NEW: transcript + order + summary pipeline ---
+            _agent.on_call_end(agent_session)
 
 
-# -----------------------------------------------------------------------------
-# Test / dev routes
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Export endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/exports/orders")
+async def list_orders():
+    """Return today's confirmed orders as JSON."""
+    orders = _sm.get_orders_today()
+    return {"count": len(orders), "orders": orders}
+
+
+@app.get("/exports/transcript/{session_uuid}")
+async def get_transcript(session_uuid: str):
+    """Download transcript .txt for a session."""
+    export_dir = os.getenv("TRANSCRIPT_DIR", "exports/transcripts")
+    # find matching file
+    try:
+        for f in os.listdir(export_dir):
+            if session_uuid[:8] in f and f.endswith(".txt"):
+                return FileResponse(
+                    os.path.join(export_dir, f),
+                    media_type="text/plain",
+                    filename=f,
+                )
+    except FileNotFoundError:
+        pass
+    return JSONResponse({"error": "Transcript not found"}, status_code=404)
+
+
+@app.get("/exports/orders/download")
+async def download_orders():
+    """Download today's Excel order sheet."""
+    from datetime import datetime, timezone, timedelta
+    IST     = timezone(timedelta(hours=5, minutes=30))
+    today   = datetime.now(IST).strftime("%Y-%m-%d")
+    path    = os.path.join(os.getenv("EXPORTS_DIR", "exports/orders"), f"{today}_orders.xlsx")
+    if not os.path.exists(path):
+        return JSONResponse({"error": "No orders today yet"}, status_code=404)
+    return FileResponse(path, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        filename=f"{today}_orders.xlsx")
+
+
+# ---------------------------------------------------------------------------
+# Test / dev routes (unchanged)
+# ---------------------------------------------------------------------------
 
 @app.post("/test/transcribe")
 async def test_transcribe(request: Request):
@@ -249,16 +299,17 @@ async def test_full(request: Request):
     data       = await request.json()
     text       = data.get("text", "")
     session_id = data.get("session_id", "test")
+    phone      = data.get("phone", "test")
 
     if session_id not in _sessions:
-        # Brand new session — reset NLU + entity state then create
         _agent.intent_classifier.reset()
         _agent.entity_resolver.reset()
+        db_sid = _sm.start_session(phone=phone, direction="inbound") if phone != "test" else None
         _sessions[session_id] = _agent.new_session(
             session_id      = session_id,
-            db_session_id   = None,
-            phone           = "test",
-            session_manager = None,
+            db_session_id   = db_sid,
+            phone           = phone,
+            session_manager = _sm if phone != "test" else None,
         )
     session = _sessions[session_id]
     result  = _agent.run_turn_text(text, session)
@@ -271,11 +322,35 @@ async def test_full(request: Request):
         "followup":   result.get("followup_text"),
         "turn":       session["turn"],
         "session_id": session_id,
+        "latency_ms": result.get("latency_ms"),
     }
+
 
 @app.post("/test/reset")
 async def test_reset(request: Request):
     data       = await request.json()
     session_id = data.get("session_id", "test")
-    _sessions.pop(session_id, None)
+    session    = _sessions.pop(session_id, None)
+    if session:
+        try:
+            _sm.flush_memory(session.get("db_session_id") or session_id, session.get("memory"))
+            _agent.on_call_end(session)
+        except Exception as e:
+            logger.warning(f"[test/reset] on_call_end failed: {e}")
     return {"reset": True, "session_id": session_id}
+
+
+@app.post("/test/end")
+async def test_end(request: Request):
+    """Called by --chat and --loop on quit/exit to trigger on_call_end pipeline."""
+    data       = await request.json()
+    session_id = data.get("session_id", "test")
+    session    = _sessions.pop(session_id, None)
+    if session:
+        try:
+            _sm.flush_memory(session.get("db_session_id") or session_id, session.get("memory"))
+            _agent.on_call_end(session)
+            logger.info(f"[test/end] on_call_end completed for {session_id[:8]}")
+        except Exception as e:
+            logger.warning(f"[test/end] on_call_end failed: {e}")
+    return {"ended": True, "session_id": session_id}
